@@ -1,0 +1,89 @@
+%%%-------------------------------------------------------------------
+%%% @doc AAA Server configuration from environment variables.
+%%% @end
+%%%-------------------------------------------------------------------
+-module(aaa_config).
+
+-export([init/0, get/1, get/2]).
+
+-define(APP, aaa_server).
+
+init() ->
+    %% Diameter identity
+    set_from_env("AAA_ORIGIN_HOST", origin_host, fun hostname_default/0),
+    set_from_env("AAA_ORIGIN_REALM", origin_realm, "localdomain"),
+
+    %% SWm server (toward ePDG)
+    set_from_env_int("AAA_SWM_PORT", swm_port, 3868),
+    set_from_env("AAA_SWM_TRANSPORT", swm_transport, "tcp"),
+
+    %% SWx client (toward HSS via DRA)
+    set_from_env("DRA_HOST", dra_host, "dra-diameter"),
+    set_from_env_int("DRA_PORT", dra_port, 3868),
+    set_from_env("DRA_TRANSPORT", dra_transport, "tcp"),
+
+    %% S6b server (toward PGW)
+    set_from_env_int("AAA_S6B_PORT", s6b_port, 3869),
+    set_from_env("AAA_S6B_TRANSPORT", s6b_transport, "tcp"),
+
+    %% PLMN
+    set_from_env("MCC", mcc, "001"),
+    set_from_env("MNC", mnc, "01"),
+
+    %% HTTP API
+    set_from_env_int("AAA_API_PORT", api_port, 8080),
+
+    %% STa interface for trusted WLAN (Hotspot 2.0 / Passpoint)
+    set_from_env_bool("AAA_STA_ENABLED", sta_enabled, false),
+    set_from_env_int("AAA_STA_PORT", sta_port, 3870),
+    set_from_env("AAA_STA_TRANSPORT", sta_transport, "tcp"),
+
+    %% Log level
+    set_from_env("AAA_LOG_LEVEL", log_level, "info"),
+
+    ok.
+
+-spec get(atom()) -> term().
+get(Key) ->
+    application:get_env(?APP, Key, undefined).
+
+-spec get(atom(), term()) -> term().
+get(Key, Default) ->
+    application:get_env(?APP, Key, Default).
+
+%%====================================================================
+%% Internal
+%%====================================================================
+
+set_from_env(EnvVar, AppKey, Default) ->
+    Value = case os:getenv(EnvVar) of
+        false when is_function(Default) -> Default();
+        false -> Default;
+        Val -> Val
+    end,
+    application:set_env(?APP, AppKey, Value).
+
+set_from_env_int(EnvVar, AppKey, Default) ->
+    Value = case os:getenv(EnvVar) of
+        false -> Default;
+        Val -> list_to_integer(Val)
+    end,
+    application:set_env(?APP, AppKey, Value).
+
+set_from_env_bool(EnvVar, AppKey, Default) ->
+    Value = case os:getenv(EnvVar) of
+        false -> Default;
+        "true"  -> true;
+        "1"     -> true;
+        "yes"   -> true;
+        _       -> false
+    end,
+    application:set_env(?APP, AppKey, Value).
+
+hostname_default() ->
+    case os:getenv("HOSTNAME") of
+        false -> "aaa.localdomain";
+        H ->
+            Realm = os:getenv("AAA_ORIGIN_REALM", "localdomain"),
+            H ++ "." ++ Realm
+    end.

@@ -1,0 +1,12 @@
+{application, aaa_server,
+ [{description, "3GPP AAA Server for VoWiFi - SWm/SWx/S6b Diameter interworking (TS 29.273)"},
+  {vsn, "0.0.1"},
+  {modules, [aaa_app, aaa_sup, aaa_config,
+             aaa_swm_server, aaa_swx_client, aaa_s6b_server,
+             aaa_sta_server,
+             aaa_session_mgr, aaa_eap_relay,
+             aaa_metrics, aaa_http, aaa_http_handler]},
+  {registered, [aaa_sup, aaa_session_mgr, aaa_swm_server,
+                aaa_swx_client, aaa_s6b_server, aaa_metrics]},
+  {applications, [kernel, stdlib, sasl, crypto, ssl, diameter, cowboy, jsx]},
+  {mod, {aaa_app, []}}]}.
