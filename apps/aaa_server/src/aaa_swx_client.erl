@@ -78,14 +78,20 @@ init([]) ->
             TransMod = transport_module(Transport),
             case resolve_host(DRAHost) of
                 {ok, DRAIP} ->
-                    diameter:add_transport(?SVC_NAME, {connect, [
+                    case diameter:add_transport(?SVC_NAME, {connect, [
                         {transport_module, TransMod},
                         {transport_config, [{raddr, DRAIP},
                                             {rport, DRAPort},
                                             {ip, {0,0,0,0}}]},
                         {reconnect_timer, 5000}
-                    ]}),
-                    logger:info("SWx client → DRA ~s:~p", [DRAHost, DRAPort]);
+                    ]}) of
+                        {ok, _Ref} ->
+                            logger:info("SWx client → DRA ~s:~p (~s)",
+                                        [DRAHost, DRAPort, Transport]);
+                        {error, TErr} ->
+                            logger:error("SWx transport to DRA ~s:~p failed: ~p",
+                                         [DRAHost, DRAPort, TErr])
+                    end;
                 {error, _} ->
                     logger:warning("Cannot resolve DRA host ~s", [DRAHost])
             end,
