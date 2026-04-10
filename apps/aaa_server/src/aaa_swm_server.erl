@@ -56,7 +56,7 @@ init([]) ->
         {'Supported-Vendor-Id', [?VENDOR_3GPP]},
         {string_decode, false},
         {application, [{alias, swm},
-                       {dictionary, diameter_gen_base_rfc6733},
+                       {dictionary, diameter_dict_swm},
                        {module, ?MODULE}]}
     ],
 
