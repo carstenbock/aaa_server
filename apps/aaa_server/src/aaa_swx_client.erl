@@ -26,8 +26,16 @@
 -define(SWX_APP_ID, 16777265).
 -define(VENDOR_3GPP, 10415).
 
+-define(DNS_RETRY_INTERVAL, 5000).
+-define(DNS_MAX_RETRIES, 60).
+
 -record(state, {
-    service_started :: boolean()
+    service_started :: boolean(),
+    transport_added :: boolean(),
+    dns_retries     :: non_neg_integer(),
+    dra_host        :: string() | undefined,
+    dra_port        :: non_neg_integer() | undefined,
+    transport_mod   :: module() | undefined
 }).
 
 %%====================================================================
@@ -76,29 +84,18 @@ init([]) ->
     case diameter:start_service(?SVC_NAME, SvcOpts) of
         ok ->
             TransMod = transport_module(Transport),
-            case resolve_host(DRAHost) of
-                {ok, DRAIP} ->
-                    case diameter:add_transport(?SVC_NAME, {connect, [
-                        {transport_module, TransMod},
-                        {transport_config, [{raddr, DRAIP},
-                                            {rport, DRAPort},
-                                            {ip, {0,0,0,0}}]},
-                        {reconnect_timer, 5000}
-                    ]}) of
-                        {ok, _Ref} ->
-                            logger:info("SWx client → DRA ~s:~p (~s)",
-                                        [DRAHost, DRAPort, Transport]);
-                        {error, TErr} ->
-                            logger:error("SWx transport to DRA ~s:~p failed: ~p",
-                                         [DRAHost, DRAPort, TErr])
-                    end;
-                {error, _} ->
-                    logger:warning("Cannot resolve DRA host ~s", [DRAHost])
-            end,
-            {ok, #state{service_started = true}};
+            State0 = #state{service_started = true,
+                            transport_added = false,
+                            dns_retries     = 0,
+                            dra_host        = DRAHost,
+                            dra_port        = DRAPort,
+                            transport_mod   = TransMod},
+            {ok, try_add_dra_transport(State0)};
         {error, Reason} ->
             logger:error("Failed to start SWx service: ~p", [Reason]),
-            {ok, #state{service_started = false}}
+            {ok, #state{service_started = false,
+                        transport_added = false,
+                        dns_retries     = 0}}
     end.
 
 handle_call({mar, IMSI, Opts}, _From, #state{service_started = true} = State) ->
@@ -148,7 +145,13 @@ handle_call(_Req, _From, State) ->
     {reply, {error, unknown}, State}.
 
 handle_cast(_Msg, State) -> {noreply, State}.
-handle_info(_Info, State) -> {noreply, State}.
+
+handle_info(retry_dra_dns, #state{transport_added = false} = State) ->
+    {noreply, try_add_dra_transport(State)};
+handle_info(retry_dra_dns, State) ->
+    {noreply, State};
+handle_info(_Info, State) ->
+    {noreply, State}.
 
 terminate(_Reason, #state{service_started = true}) ->
     diameter:stop_service(?SVC_NAME), ok;
@@ -208,6 +211,39 @@ handle_request(#diameter_packet{msg = Msg}, _SvcName, _Peer) ->
 %%====================================================================
 %% Internal
 %%====================================================================
+
+try_add_dra_transport(#state{dra_host = DRAHost, dra_port = DRAPort,
+                             transport_mod = TransMod,
+                             dns_retries = Retries} = State) ->
+    case resolve_host(DRAHost) of
+        {ok, DRAIP} ->
+            case diameter:add_transport(?SVC_NAME, {connect, [
+                {transport_module, TransMod},
+                {transport_config, [{raddr, DRAIP},
+                                    {rport, DRAPort},
+                                    {ip, {0,0,0,0}}]},
+                {reconnect_timer, 5000}
+            ]}) of
+                {ok, _Ref} ->
+                    logger:info("SWx client → DRA ~s:~p", [DRAHost, DRAPort]),
+                    State#state{transport_added = true};
+                {error, TErr} ->
+                    logger:error("SWx transport to DRA ~s:~p failed: ~p",
+                                 [DRAHost, DRAPort, TErr]),
+                    State#state{transport_added = false}
+            end;
+        {error, _} when Retries < ?DNS_MAX_RETRIES ->
+            logger:warning("Cannot resolve DRA host ~s, retrying in ~Bms "
+                           "(attempt ~B/~B)",
+                           [DRAHost, ?DNS_RETRY_INTERVAL,
+                            Retries + 1, ?DNS_MAX_RETRIES]),
+            erlang:send_after(?DNS_RETRY_INTERVAL, self(), retry_dra_dns),
+            State#state{dns_retries = Retries + 1};
+        {error, _} ->
+            logger:error("Cannot resolve DRA host ~s after ~B attempts, "
+                         "giving up", [DRAHost, Retries]),
+            State#state{transport_added = false}
+    end.
 
 parse_maa(Answer) when is_list(Answer) ->
     ResultCode = proplists:get_value('Result-Code', tl(Answer), 0),
