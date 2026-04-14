@@ -26,8 +26,8 @@
 -define(SWX_APP_ID, 16777265).
 -define(VENDOR_3GPP, 10415).
 
--define(DNS_RETRY_INTERVAL, 5000).
--define(DNS_MAX_RETRIES, 60).
+-define(DNS_RETRY_INITIAL, 5000).
+-define(DNS_RETRY_MAX,    60000).
 
 -record(state, {
     service_started :: boolean(),
@@ -226,24 +226,27 @@ try_add_dra_transport(#state{dra_host = DRAHost, dra_port = DRAPort,
             ]}) of
                 {ok, _Ref} ->
                     logger:info("SWx client → DRA ~s:~p", [DRAHost, DRAPort]),
-                    State#state{transport_added = true};
+                    State#state{transport_added = true, dns_retries = 0};
                 {error, TErr} ->
-                    logger:error("SWx transport to DRA ~s:~p failed: ~p",
-                                 [DRAHost, DRAPort, TErr]),
-                    State#state{transport_added = false}
+                    Delay = retry_delay(Retries),
+                    logger:error("SWx transport to DRA ~s:~p failed: ~p, "
+                                 "retrying in ~Bms",
+                                 [DRAHost, DRAPort, TErr, Delay]),
+                    erlang:send_after(Delay, self(), retry_dra_dns),
+                    State#state{transport_added = false,
+                                dns_retries = Retries + 1}
             end;
-        {error, _} when Retries < ?DNS_MAX_RETRIES ->
-            logger:warning("Cannot resolve DRA host ~s, retrying in ~Bms "
-                           "(attempt ~B/~B)",
-                           [DRAHost, ?DNS_RETRY_INTERVAL,
-                            Retries + 1, ?DNS_MAX_RETRIES]),
-            erlang:send_after(?DNS_RETRY_INTERVAL, self(), retry_dra_dns),
-            State#state{dns_retries = Retries + 1};
         {error, _} ->
-            logger:error("Cannot resolve DRA host ~s after ~B attempts, "
-                         "giving up", [DRAHost, Retries]),
-            State#state{transport_added = false}
+            Delay = retry_delay(Retries),
+            logger:warning("Cannot resolve DRA host ~s, retrying in ~Bms "
+                           "(attempt ~B)",
+                           [DRAHost, Delay, Retries + 1]),
+            erlang:send_after(Delay, self(), retry_dra_dns),
+            State#state{dns_retries = Retries + 1}
     end.
+
+retry_delay(Retries) ->
+    min(?DNS_RETRY_INITIAL bsl min(Retries, 4), ?DNS_RETRY_MAX).
 
 parse_maa(Answer) when is_list(Answer) ->
     ResultCode = proplists:get_value('Result-Code', tl(Answer), 0),
