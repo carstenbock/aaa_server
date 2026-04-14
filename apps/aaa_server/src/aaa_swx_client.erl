@@ -35,7 +35,8 @@
     dns_retries     :: non_neg_integer(),
     dra_host        :: string() | undefined,
     dra_port        :: non_neg_integer() | undefined,
-    transport_mod   :: module() | undefined
+    transport_mod   :: module() | undefined,
+    transport_ref   :: term() | undefined
 }).
 
 %%====================================================================
@@ -150,6 +151,17 @@ handle_info(retry_dra_dns, #state{transport_added = false} = State) ->
     {noreply, try_add_dra_transport(State)};
 handle_info(retry_dra_dns, State) ->
     {noreply, State};
+handle_info(re_resolve_dra, #state{transport_added = true,
+                                    transport_ref = OldRef} = State) ->
+    %% Peer went down and reconnect may be stuck on a stale IP.
+    %% Remove old transport and re-resolve DNS for a fresh connection.
+    logger:info("SWx: re-resolving DRA hostname after peer down"),
+    catch diameter:remove_transport(?SVC_NAME, OldRef),
+    {noreply, try_add_dra_transport(State#state{transport_added = false,
+                                                 transport_ref = undefined,
+                                                 dns_retries = 0})};
+handle_info(re_resolve_dra, State) ->
+    {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -171,6 +183,7 @@ peer_up(_SvcName, _Peer, State) ->
 peer_down(_SvcName, _Peer, State) ->
     logger:warning("SWx peer down"),
     aaa_metrics:gauge_dec(swx_peers),
+    erlang:send_after(15000, ?SERVER, re_resolve_dra),
     State.
 
 pick_peer([Peer | _], _, _SvcName, _State) ->
@@ -224,9 +237,10 @@ try_add_dra_transport(#state{dra_host = DRAHost, dra_port = DRAPort,
                                     {ip, {0,0,0,0}}]},
                 {reconnect_timer, 5000}
             ]}) of
-                {ok, _Ref} ->
+                {ok, Ref} ->
                     logger:info("SWx client → DRA ~s:~p", [DRAHost, DRAPort]),
-                    State#state{transport_added = true, dns_retries = 0};
+                    State#state{transport_added = true, dns_retries = 0,
+                                transport_ref = Ref};
                 {error, TErr} ->
                     Delay = retry_delay(Retries),
                     logger:error("SWx transport to DRA ~s:~p failed: ~p, "
