@@ -16,7 +16,9 @@ init(Req, #{action := ready} = State) ->
     SwxPeers = aaa_metrics:get(swx_peers),
     {Code, Body} = case SwxPeers > 0 of
         true  -> {200, <<"ready">>};
-        false -> {503, <<"not ready: no SWx peers">>}
+        false ->
+            logger:warning("Readiness check failed: no SWx peers connected"),
+            {503, <<"not ready: no SWx peers">>}
     end,
     Reply = cowboy_req:reply(Code,
         #{<<"content-type">> => <<"text/plain">>},
