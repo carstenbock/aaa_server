@@ -29,6 +29,7 @@
 
 -define(DNS_RETRY_INITIAL, 5000).
 -define(DNS_RETRY_MAX,    60000).
+-define(HEALTH_CHECK_INTERVAL, 30000).
 
 -record(state, {
     service_started :: boolean(),
@@ -90,8 +91,9 @@ init([]) ->
                             dra_port        = DRAPort,
                             transport_mod   = TransMod,
                             transports      = InitTransports},
-            logger:info("SWx client: connecting to ~B DRA host(s): ~p",
-                        [length(DRAHosts), DRAHosts]),
+            logger:notice("SWx client: connecting to ~B DRA host(s): ~p",
+                          [length(DRAHosts), DRAHosts]),
+            erlang:send_after(?HEALTH_CHECK_INTERVAL, self(), health_check),
             {ok, connect_all(State0)};
         {error, Reason} ->
             logger:error("Failed to start SWx service: ~p", [Reason]),
@@ -162,13 +164,30 @@ handle_info({diameter_peer_down, PeerRef}, #state{transports = Ts} = State) ->
 handle_info({re_resolve_dra, Host}, #state{transports = Ts} = State) ->
     case maps:find(Host, Ts) of
         {ok, {OldRef, _}} when OldRef =/= undefined ->
-            logger:info("SWx: re-resolving DRA ~s after peer down", [Host]),
+            logger:notice("SWx: re-resolving DRA ~s after peer down", [Host]),
             catch diameter:remove_transport(?SVC_NAME, OldRef),
             NewTs = Ts#{Host => {undefined, 0}},
             {noreply, try_connect_host(Host, State#state{transports = NewTs})};
         _ ->
             {noreply, try_connect_host(Host, State)}
     end;
+handle_info({force_reconnect, Host}, #state{transports = Ts} = State) ->
+    case maps:find(Host, Ts) of
+        {ok, {OldRef, _}} when OldRef =/= undefined ->
+            logger:warning("SWx: forcing reconnect to DRA ~s (stale IP detected)", [Host]),
+            catch diameter:remove_transport(?SVC_NAME, OldRef),
+            NewTs = Ts#{Host => {undefined, 0}},
+            {noreply, try_connect_host(Host, State#state{transports = NewTs})};
+        _ ->
+            {noreply, try_connect_host(Host, State)}
+    end;
+handle_info(health_check, #state{service_started = true} = State) ->
+    check_transport_health(State),
+    erlang:send_after(?HEALTH_CHECK_INTERVAL, self(), health_check),
+    {noreply, State};
+handle_info(health_check, State) ->
+    erlang:send_after(?HEALTH_CHECK_INTERVAL, self(), health_check),
+    {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -182,8 +201,12 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %% Diameter callbacks
 %%====================================================================
 
-peer_up(_SvcName, _Peer, State) ->
-    logger:info("SWx peer up (DRA/HSS reachable)"),
+peer_up(_SvcName, {_PeerRef, Caps}, State) ->
+    RemoteHost = case Caps of
+        #diameter_caps{origin_host = {_, RH}} -> RH;
+        _ -> <<"unknown">>
+    end,
+    logger:notice("SWx peer up: ~s (DRA/HSS reachable)", [RemoteHost]),
     aaa_metrics:gauge_inc(swx_peers),
     State.
 
@@ -236,6 +259,101 @@ connect_all(State) ->
     Hosts = maps:keys(State#state.transports),
     lists:foldl(fun(H, S) -> try_connect_host(H, S) end, State, Hosts).
 
+%% Periodic health check: inspect diameter transport state and log
+%% connection issues that the framework handles silently (e.g. CER
+%% rejected with 4003 ELECTION_LOST due to Origin-Host collision).
+check_transport_health(#state{transports = Ts}) ->
+    case diameter:service_info(?SVC_NAME, transport) of
+        TInfos when is_list(TInfos) ->
+            lists:foreach(fun(I) -> check_single_transport(I, Ts) end, TInfos);
+        _ ->
+            ok
+    end.
+
+check_single_transport(Info, Transports) when is_list(Info) ->
+    case proplists:get_value(type, Info) of
+        connect ->
+            Ref = proplists:get_value(ref, Info),
+            Opts = proplists:get_value(options, Info, []),
+            TC = proplists:get_value(transport_config, Opts, []),
+            RAddr = proplists:get_value(raddr, TC, undefined),
+            WD = proplists:get_value(watchdog, Info, undefined),
+            Stats = proplists:get_value(statistics, Info, []),
+            WDState = case WD of
+                {_, _, S} -> S;
+                _ -> unknown
+            end,
+            case WDState of
+                okay -> ok;
+                _ ->
+                    check_cer_result(RAddr, WDState, Stats),
+                    check_stale_ip(RAddr, Ref, Transports)
+            end;
+        _ ->
+            ok
+    end;
+check_single_transport(_, _) ->
+    ok.
+
+check_cer_result(RAddr, WDState, Stats) ->
+    ElectionLost = [N || {{{0, 257, 0}, recv, {'Result-Code', 4003}}, N} <- Stats],
+    case ElectionLost of
+        [Count] when Count > 0 ->
+            logger:warning(
+                "SWx transport to DRA ~s stuck: watchdog=~p, "
+                "CER rejected ~B times with Result-Code 4003 "
+                "(ELECTION_LOST). Probable cause: duplicate "
+                "Origin-Host — verify AAA_ORIGIN_HOST is unique "
+                "per pod (current: ~s)",
+                [format_ip(RAddr), WDState, Count,
+                 aaa_config:get(origin_host, "unknown")]);
+        _ ->
+            OtherErrors = [{RC, N} ||
+                {{{0, 257, 0}, recv, {'Result-Code', RC}}, N} <- Stats,
+                RC =/= 2001],
+            case OtherErrors of
+                [] when WDState =/= okay ->
+                    logger:warning(
+                        "SWx transport to DRA ~s: watchdog=~p, "
+                        "no successful CER/CEA yet",
+                        [format_ip(RAddr), WDState]);
+                [{RC, N} | _] ->
+                    logger:warning(
+                        "SWx transport to DRA ~s: watchdog=~p, "
+                        "CER rejected ~B times with Result-Code ~B",
+                        [format_ip(RAddr), WDState, N, RC]);
+                _ ->
+                    ok
+            end
+    end.
+
+check_stale_ip(undefined, _Ref, _Transports) -> ok;
+check_stale_ip(RAddr, Ref, Transports) ->
+    Host = host_for_ref(Ref, Transports),
+    case Host of
+        undefined -> ok;
+        _ ->
+            case resolve_host(Host) of
+                {ok, CurrentIP} when CurrentIP =/= RAddr ->
+                    logger:warning("SWx transport ~p: stale IP ~p for host ~s "
+                                   "(current DNS: ~p), forcing reconnect",
+                                   [Ref, RAddr, Host, CurrentIP]),
+                    self() ! {force_reconnect, Host};
+                _ -> ok
+            end
+    end.
+
+host_for_ref(Ref, Transports) ->
+    case [H || {H, {R, _}} <- maps:to_list(Transports), R =:= Ref] of
+        [Host | _] -> Host;
+        [] -> undefined
+    end.
+
+format_ip({A, B, C, D}) ->
+    io_lib:format("~B.~B.~B.~B", [A, B, C, D]);
+format_ip(Other) ->
+    io_lib:format("~p", [Other]).
+
 try_connect_host(Host, #state{dra_port = DRAPort, transport_mod = TransMod,
                                transports = Ts} = State) ->
     {_OldRef, Retries} = maps:get(Host, Ts, {undefined, 0}),
@@ -249,7 +367,7 @@ try_connect_host(Host, #state{dra_port = DRAPort, transport_mod = TransMod,
                 {reconnect_timer, 5000}
             ]}) of
                 {ok, Ref} ->
-                    logger:info("SWx client -> DRA ~s:~p", [Host, DRAPort]),
+                    logger:notice("SWx transport added -> DRA ~s:~p", [Host, DRAPort]),
                     State#state{transports = Ts#{Host => {Ref, 0}}};
                 {error, TErr} ->
                     Delay = retry_delay(Retries),

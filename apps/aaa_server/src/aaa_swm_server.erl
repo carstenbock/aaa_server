@@ -69,7 +69,7 @@ init([]) ->
                                     {ip, {0,0,0,0}},
                                     {port, SwmPort}]}
             ]}),
-            logger:info("SWm server listening on port ~p (~s)", [SwmPort, Transport]),
+            logger:notice("SWm server listening on port ~B (~s)", [SwmPort, Transport]),
             {ok, #state{service_started = true}};
         {error, Reason} ->
             logger:error("Failed to start SWm service: ~p", [Reason]),
@@ -97,13 +97,21 @@ code_change(_OldVsn, State, _Extra) ->
 %% Diameter callbacks
 %%====================================================================
 
-peer_up(_SvcName, _Peer, State) ->
-    logger:info("SWm peer up (ePDG connected)"),
+peer_up(_SvcName, {_PeerRef, Caps}, State) ->
+    RemoteHost = case Caps of
+        #diameter_caps{origin_host = {_, RH}} -> RH;
+        _ -> <<"unknown">>
+    end,
+    logger:notice("SWm peer up: ~s (ePDG connected)", [RemoteHost]),
     aaa_metrics:gauge_inc(swm_peers),
     State.
 
-peer_down(_SvcName, _Peer, State) ->
-    logger:warning("SWm peer down"),
+peer_down(_SvcName, {_PeerRef, Caps}, State) ->
+    RemoteHost = case Caps of
+        #diameter_caps{origin_host = {_, RH}} -> RH;
+        _ -> <<"unknown">>
+    end,
+    logger:notice("SWm peer down: ~s", [RemoteHost]),
     aaa_metrics:gauge_dec(swm_peers),
     State.
 

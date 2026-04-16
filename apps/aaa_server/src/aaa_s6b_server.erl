@@ -69,7 +69,7 @@ init([]) ->
                                     {ip, {0,0,0,0}},
                                     {port, S6bPort}]}
             ]}),
-            logger:info("S6b server listening on port ~p (~s)", [S6bPort, Transport]),
+            logger:notice("S6b server listening on port ~B (~s)", [S6bPort, Transport]),
             {ok, #state{service_started = true}};
         {error, Reason} ->
             logger:error("Failed to start S6b service: ~p", [Reason]),
@@ -90,13 +90,21 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %% Diameter callbacks
 %%====================================================================
 
-peer_up(_SvcName, _Peer, State) ->
-    logger:info("S6b peer up (PGW connected)"),
+peer_up(_SvcName, {_PeerRef, Caps}, State) ->
+    RemoteHost = case Caps of
+        #diameter_caps{origin_host = {_, RH}} -> RH;
+        _ -> <<"unknown">>
+    end,
+    logger:notice("S6b peer up: ~s (PGW/SMF connected)", [RemoteHost]),
     aaa_metrics:gauge_inc(s6b_peers),
     State.
 
-peer_down(_SvcName, _Peer, State) ->
-    logger:warning("S6b peer down"),
+peer_down(_SvcName, {_PeerRef, Caps}, State) ->
+    RemoteHost = case Caps of
+        #diameter_caps{origin_host = {_, RH}} -> RH;
+        _ -> <<"unknown">>
+    end,
+    logger:notice("S6b peer down: ~s", [RemoteHost]),
     aaa_metrics:gauge_dec(s6b_peers),
     State.
 
