@@ -108,13 +108,19 @@ handle_der(AVPs, Caps) ->
     EapPayload = avp('EAP-Payload', AVPs, <<>>),
     PeerHost   = origin_host(Caps),
 
-    Session0 = load_or_create_session(SessionId, AVPs, PeerHost),
+    {Session0, SessionSource} =
+        load_or_create_session_tagged(SessionId, AVPs, PeerHost),
     %% #region agent log
-    logger:notice("SWm handle_der: session_id=~s eap_len=~p imsi=~p",
-                  [SessionId,
+    logger:notice("SWm handle_der: session_id=~s source=~p eap_len=~p "
+                  "imsi=~p eap_state=~p method=~p xres_len=~p k_aut_len=~p",
+                  [SessionId, SessionSource,
                    case EapPayload of B when is_binary(B) -> byte_size(B);
                                        _ -> undefined end,
-                   Session0#aaa_session.imsi]),
+                   Session0#aaa_session.imsi,
+                   Session0#aaa_session.eap_state,
+                   Session0#aaa_session.method,
+                   bin_len(Session0#aaa_session.xres),
+                   bin_len(Session0#aaa_session.k_aut)]),
     %% #endregion
     Result = aaa_eap_relay:process(swm, EapPayload, Session0),
     %% #region agent log
@@ -371,9 +377,13 @@ with_subscription(Msg, _IMSI, UserData, APNs) ->
 %%====================================================================
 
 load_or_create_session(SessionId, AVPs, PeerHost) ->
+    {S, _Src} = load_or_create_session_tagged(SessionId, AVPs, PeerHost),
+    S.
+
+load_or_create_session_tagged(SessionId, AVPs, PeerHost) ->
     case aaa_session_mgr:get_session(SessionId) of
         {ok, S} ->
-            S;
+            {S, existing};
         error ->
             IMSI = avp('User-Name', AVPs, undefined),
             Rec = #aaa_session{
@@ -387,8 +397,13 @@ load_or_create_session(SessionId, AVPs, PeerHost) ->
                 visited_plmn = avp('Visited-Network-Identifier', AVPs, undefined),
                 created_ts = 0, updated_ts = 0},
             ok = aaa_session_mgr:create_session(Rec),
-            Rec
+            {Rec, created}
     end.
+
+%% #region agent log
+bin_len(B) when is_binary(B) -> byte_size(B);
+bin_len(_)                   -> 0.
+%% #endregion
 
 %%====================================================================
 %% Helpers

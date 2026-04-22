@@ -197,12 +197,63 @@ dispatch(_Iface, #{code := ?EAP_CODE_RESPONSE, type := T,
     aaa_metrics:inc(eap_relay_failure_total),
     {error, {client_error, Code}};
 
-dispatch(_Iface, Pkt, Raw, _S0) ->
+%% AKA/AKA' Challenge response arrived but session is missing XRES/KAut.
+%% This means either (a) the AAA never saw the EAP-Identity DER for this
+%% Session-Id (cross-pod mis-routing, DRA picked a different peer for the
+%% challenge round), (b) the session was evicted/expired, or (c) the SWx
+%% MAR earlier failed to produce usable CK/IK so start_challenge never
+%% stored keys. Return a failure rather than a generic catch-all so the
+%% peer gets a deterministic DEA and the operator sees the real cause.
+dispatch(_Iface, #{code := ?EAP_CODE_RESPONSE, type := T,
+                   subtype := ?AKA_CHALLENGE} = Pkt,
+         Raw, S0)
+  when T =:= ?EAP_TYPE_AKA; T =:= ?EAP_TYPE_AKA_PRIME ->
+    aaa_metrics:inc(eap_relay_failure_total),
     %% #region agent log
-    logger:notice("EAP dispatch unexpected: raw_hex=~s len=~p pkt=~P",
-                  [hex(Raw), byte_size(Raw), Pkt, 12]),
+    logger:warning("EAP-AKA~s Challenge-Response on session without keys: "
+                   "session_id=~s imsi=~p eap_state=~p method=~p "
+                   "xres=~p k_aut_len=~p rand_len=~p autn_len=~p "
+                   "raw_hex=~s len=~p pkt=~P",
+                   [case T of
+                        ?EAP_TYPE_AKA_PRIME -> "'";
+                        _                   -> ""
+                    end,
+                    S0#aaa_session.session_id,
+                    S0#aaa_session.imsi,
+                    S0#aaa_session.eap_state,
+                    S0#aaa_session.method,
+                    type_tag(S0#aaa_session.xres),
+                    bsize(S0#aaa_session.k_aut),
+                    bsize(S0#aaa_session.rand),
+                    bsize(S0#aaa_session.autn),
+                    hex(Raw), byte_size(Raw), Pkt, 12]),
+    %% #endregion
+    {error, challenge_without_session_state};
+
+dispatch(_Iface, Pkt, Raw, S0) ->
+    %% #region agent log
+    logger:notice("EAP dispatch unexpected: raw_hex=~s len=~p pkt=~P "
+                  "session_id=~s imsi=~p eap_state=~p method=~p "
+                  "xres=~p k_aut_len=~p",
+                  [hex(Raw), byte_size(Raw), Pkt, 12,
+                   S0#aaa_session.session_id,
+                   S0#aaa_session.imsi,
+                   S0#aaa_session.eap_state,
+                   S0#aaa_session.method,
+                   type_tag(S0#aaa_session.xres),
+                   bsize(S0#aaa_session.k_aut)]),
     %% #endregion
     {error, unexpected_eap}.
+
+%% #region agent log
+type_tag(undefined)           -> undefined;
+type_tag(B) when is_binary(B) -> {binary, byte_size(B)};
+type_tag(Other)               -> {other, Other}.
+
+bsize(undefined)              -> 0;
+bsize(B) when is_binary(B)    -> byte_size(B);
+bsize(_)                      -> 0.
+%% #endregion
 
 %%====================================================================
 %% Method selection — TS 23.003 §19.3.2 / RFC 4187/5448 §4.1.1.6
@@ -233,6 +284,15 @@ method_from_nai(NAI) ->
 
 start_challenge(Iface, Method, IMSI, NAI, Id, S0) ->
     NetworkName = network_name(Iface),
+    %% #region agent log
+    logger:notice("EAP start_challenge: method=~p imsi=~s nai=~s iface=~p "
+                  "network_name=~s session_id=~s",
+                  [Method, IMSI, NAI, Iface, NetworkName,
+                   case S0 of
+                       #aaa_session{session_id = Sid} -> Sid;
+                       _ -> undefined
+                   end]),
+    %% #endregion
     %% TS 29.273 §8.1.2.1.1: SWx MAR User-Name carries the EAP NAI (not
     %% a bare IMSI) so that PyHSS (and any conformant HSS) can parse the
     %% RFC 4187/5448 §4.1.1.6 identity-type prefix.
