@@ -189,10 +189,17 @@ peer_up(_Svc, {_PeerRef, Caps}, State) ->
     aaa_metrics:gauge_inc(swx_peers),
     State.
 
-peer_down(_Svc, {_PeerRef, Caps}, State) ->
+peer_down(_Svc, {PeerRef, Caps}, State) ->
     RH = origin_host_cap(Caps),
     logger:warning("SWx peer down: ~s", [RH]),
     aaa_metrics:gauge_dec(swx_peers),
+    %% Notify the service gen_server so it can schedule a DNS re-resolve
+    %% and (if needed) rebuild the transport. OTP diameter's built-in
+    %% reconnect loop reuses the literal `raddr' tuple we passed to
+    %% add_transport, so if the DRA pod's IP changed, we will loop
+    %% forever on the stale IP unless we explicitly remove + re-add the
+    %% transport with a freshly-resolved address.
+    catch aaa_diameter_svc ! {diameter_peer_down, PeerRef},
     State.
 
 pick_peer([P | _], _, _Svc, _State) -> {ok, P};

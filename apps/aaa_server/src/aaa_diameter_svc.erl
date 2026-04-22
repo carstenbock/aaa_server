@@ -132,8 +132,57 @@ handle_cast(_Msg, State) -> {noreply, State}.
 
 handle_info({retry_swx, Host}, State) ->
     {noreply, try_connect_swx(Host, State)};
+handle_info({diameter_peer_down, PeerRef},
+            #state{swx_transports = Ts} = State) ->
+    %% A DRA peer dropped. Map the PeerRef back to one of our outbound
+    %% SWx transports (if any) and schedule a DNS re-resolution + rebuild.
+    %% If the PeerRef belongs to an inbound listener (e.g. ePDG on SWm,
+    %% PGW on S6b), it will not match any entry in swx_transports and we
+    %% simply ignore the event — listener peers have no host to re-resolve.
+    case host_for_peer_ref(PeerRef, Ts) of
+        undefined ->
+            {noreply, State};
+        Host ->
+            logger:notice(
+              "[dra-reconnect] SWx peer down for ~s — scheduling DNS "
+              "re-resolve in 15s", [Host]),
+            erlang:send_after(15000, self(), {re_resolve_dra, Host}),
+            {noreply, State}
+    end;
+handle_info({re_resolve_dra, Host},
+            #state{swx_transports = Ts} = State) ->
+    case maps:find(Host, Ts) of
+        {ok, {OldRef, _}} when OldRef =/= undefined ->
+            logger:notice(
+              "[dra-reconnect] re-resolving DRA ~s after peer down", [Host]),
+            catch diameter:remove_transport(?SVC, OldRef),
+            NewTs = Ts#{Host => {undefined, 0}},
+            {noreply, try_connect_swx(Host, State#state{swx_transports = NewTs})};
+        _ ->
+            %% No ref (transport never came up, or was already torn down);
+            %% still attempt a connect so we recover from DNS failure too.
+            {noreply, try_connect_swx(Host, State)}
+    end;
+handle_info({force_reconnect, Host},
+            #state{swx_transports = Ts} = State) ->
+    case maps:find(Host, Ts) of
+        {ok, {OldRef, _}} when OldRef =/= undefined ->
+            logger:warning(
+              "[dra-reconnect] forcing SWx reconnect to DRA ~s "
+              "(stale IP detected)", [Host]),
+            catch diameter:remove_transport(?SVC, OldRef),
+            NewTs = Ts#{Host => {undefined, 0}},
+            {noreply, try_connect_swx(Host, State#state{swx_transports = NewTs})};
+        _ ->
+            {noreply, try_connect_swx(Host, State)}
+    end;
 handle_info(health_check, State) ->
     aaa_metrics:gauge_set(swx_peers, swx_peer_count()),
+    %% Detect stale IPs: if DNS for a configured DRA host now resolves to
+    %% a different address than the one our transport was opened with,
+    %% force a rebuild. Required because OTP diameter's reconnect loop
+    %% never re-consults DNS on its own.
+    check_stale_dra_ips(State),
     erlang:send_after(?HEALTH_INTERVAL, self(), health_check),
     {noreply, State};
 handle_info(_, State) -> {noreply, State}.
@@ -301,6 +350,94 @@ resolve_host(H) ->
                 {ok, IP} -> {ok, IP};
                 E -> E
             end
+    end.
+
+%% Map a diameter PeerRef back to the DRA hostname we opened a SWx
+%% connect transport to. Returns `undefined' if the PeerRef belongs to
+%% something other than one of our outbound SWx transports (e.g. an
+%% inbound listener peer).
+host_for_peer_ref(PeerRef, Transports) ->
+    TInfos = case catch diameter:service_info(?SVC, transport) of
+                 L when is_list(L) -> L;
+                 _ -> []
+             end,
+    case find_transport_ref(TInfos, PeerRef) of
+        {ok, TransRef} ->
+            case [H || {H, {R, _}} <- maps:to_list(Transports),
+                       R =:= TransRef] of
+                [Host | _] -> Host;
+                [] -> undefined
+            end;
+        error -> undefined
+    end.
+
+find_transport_ref(TInfos, PeerRef) ->
+    Matches = [proplists:get_value(ref, Info)
+               || Info <- TInfos,
+                  is_list(Info),
+                  match_peer_ref(Info, PeerRef)],
+    case Matches of
+        [Ref | _] -> {ok, Ref};
+        [] -> error
+    end.
+
+match_peer_ref(Info, PeerRef) ->
+    case proplists:get_value(peer, Info) of
+        {_, PRef} when PRef =:= PeerRef -> true;
+        _ ->
+            case proplists:get_value(accept, Info) of
+                Accept when is_list(Accept) ->
+                    lists:any(fun(A) ->
+                        case proplists:get_value(peer, A) of
+                            {_, PR} when PR =:= PeerRef -> true;
+                            _ -> false
+                        end
+                    end, Accept);
+                _ -> false
+            end
+    end.
+
+%% For every configured DRA host, compare the current transport's
+%% `raddr' against a fresh DNS lookup. If they differ, queue a
+%% force_reconnect so the transport is rebuilt against the new IP.
+check_stale_dra_ips(#state{dra_hosts = Hosts, swx_transports = Ts}) ->
+    TInfos = case catch diameter:service_info(?SVC, transport) of
+                 L when is_list(L) -> L;
+                 _ -> []
+             end,
+    lists:foreach(
+      fun(Host) ->
+          case maps:get(Host, Ts, undefined) of
+              {Ref, _} when Ref =/= undefined ->
+                  maybe_force_reconnect(Host, Ref, TInfos);
+              _ -> ok
+          end
+      end, Hosts).
+
+maybe_force_reconnect(Host, Ref, TInfos) ->
+    case raddr_for_ref(Ref, TInfos) of
+        undefined -> ok;
+        RAddr ->
+            case resolve_host(Host) of
+                {ok, CurrentIP} when CurrentIP =/= RAddr ->
+                    logger:warning(
+                      "[dra-reconnect] stale IP detected for ~s: "
+                      "transport raddr=~p, current DNS=~p — "
+                      "forcing reconnect",
+                      [Host, RAddr, CurrentIP]),
+                    self() ! {force_reconnect, Host};
+                _ -> ok
+            end
+    end.
+
+raddr_for_ref(Ref, TInfos) ->
+    case [proplists:get_value(transport_config,
+            proplists:get_value(options, Info, []), [])
+          || Info <- TInfos,
+             is_list(Info),
+             proplists:get_value(ref, Info) =:= Ref] of
+        [Cfg | _] -> proplists:get_value(raddr, Cfg);
+        [] -> undefined
     end.
 
 to_bin(B) when is_binary(B) -> B;
