@@ -165,11 +165,21 @@ service_options(OH, OR, StaEnabled) ->
             'Vendor-Id' = ?VENDOR_3GPP,
             'Auth-Application-Id' = [Id]} || Id <- AuthIds]},
      {string_decode, false},
+     %% All application handler modules (aaa_swm_server, aaa_swx_client,
+     %% aaa_s6b_server, aaa_sta_server) pattern-match the list form
+     %% `['Cmd' | AVPs]` on incoming requests. OTP's default
+     %% `decode_format' is `record', which delivers messages as
+     %% `#diameter_swm_DER{}' records and would make every handler fall
+     %% through its catch-all clause (answering 3001).
+     {decode_format, list},
      {application, [{alias, swm},
                     {dictionary, diameter_gen_swm},
                     {module, aaa_swm_server},
                     {answer_errors, callback},
-                    {request_errors, answer_3xxx}]},
+                    %% Deliberately use `callback' so decode/routing 3xxx
+                    %% errors reach handle_request and we can see WHY
+                    %% OTP would have auto-answered 3001.
+                    {request_errors, callback}]},
      {application, [{alias, swx},
                     {dictionary, diameter_gen_swx},
                     {module, aaa_swx_client},
@@ -240,8 +250,19 @@ try_connect_swx(Host, #state{dra_port = Port, dra_transport_mod = TMod,
                 {transport_config, [{raddr, IP}, {rport, Port},
                                     {ip, {0,0,0,0}}]},
                 {reconnect_timer, 5000},
+                %% Advertise ALL AAA-served apps on this transport.
+                %% The DRA reuses this TCP connection to relay SWm DERs
+                %% (ePDG → DRA → AAA). If we advertise SWx only, OTP
+                %% diameter auto-rejects the incoming SWm DER with 3001
+                %% before any application handler sees it.
                 {capabilities,
-                    [{'Auth-Application-Id', [?SWX_APP_ID]}]}
+                    [{'Auth-Application-Id',
+                        [?SWM_APP_ID, ?SWX_APP_ID, ?S6B_APP_ID]},
+                     {'Vendor-Specific-Application-Id',
+                        [#'diameter_base_Vendor-Specific-Application-Id'{
+                            'Vendor-Id' = ?VENDOR_3GPP,
+                            'Auth-Application-Id' = [Id]}
+                         || Id <- [?SWM_APP_ID, ?SWX_APP_ID, ?S6B_APP_ID]]}]}
             ]}) of
                 {ok, Ref} ->
                     logger:notice("SWx transport added -> DRA ~s:~B", [Host, Port]),

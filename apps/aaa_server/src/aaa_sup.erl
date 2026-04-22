@@ -1,5 +1,11 @@
 %%%-------------------------------------------------------------------
 %%% @doc 3GPP AAA Server top-level supervisor.
+%%%
+%%% The Diameter stack is owned by `aaa_diameter_svc' — a single
+%%% `diameter:start_service/2' advertising SWm, SWx, S6b and (optionally)
+%%% STa Auth-Application-Ids. Per-interface logic lives in pure
+%%% callback modules (aaa_swm_server, aaa_swx_client, aaa_s6b_server,
+%%% aaa_sta_server) registered on that service.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(aaa_sup).
@@ -22,34 +28,21 @@ init([]) ->
           start => {aaa_session_mgr, start_link, []},
           restart => permanent, shutdown => 5000, type => worker},
 
-        #{id => aaa_swx_client,
-          start => {aaa_swx_client, start_link, []},
-          restart => permanent, shutdown => 5000, type => worker},
+        #{id => aaa_diameter_svc,
+          start => {aaa_diameter_svc, start_link, []},
+          restart => permanent, shutdown => 10000, type => worker},
 
-        #{id => aaa_swm_server,
-          start => {aaa_swm_server, start_link, []},
-          restart => permanent, shutdown => 5000, type => worker},
-
-        #{id => aaa_s6b_server,
-          start => {aaa_s6b_server, start_link, []},
-          restart => permanent, shutdown => 5000, type => worker}
-    ],
-
-    %% STa interface for trusted WLAN (Hotspot 2.0 / Passpoint)
-    %% Starts only when AAA_STA_ENABLED=true
-    StaChildren = case aaa_config:get(sta_enabled, false) of
-        true ->
-            [#{id => aaa_sta_server,
-               start => {aaa_sta_server, start_link, []},
-               restart => permanent, shutdown => 5000, type => worker}];
-        _ ->
-            []
-    end,
-
-    InfraChildren = [
         #{id => aaa_http,
           start => {aaa_http, start_link, []},
           restart => permanent, shutdown => 5000, type => worker}
     ],
 
-    {ok, {SupFlags, CoreChildren ++ StaChildren ++ InfraChildren}}.
+    RadiusChildren = case aaa_config:get(radius_enabled, false) of
+        true ->
+            [#{id => aaa_radius,
+               start => {aaa_radius, start_link, []},
+               restart => permanent, shutdown => 5000, type => worker}];
+        _ -> []
+    end,
+
+    {ok, {SupFlags, CoreChildren ++ RadiusChildren}}.

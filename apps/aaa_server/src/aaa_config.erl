@@ -39,6 +39,15 @@ init() ->
     set_from_env_int("AAA_STA_PORT", sta_port, 3870),
     set_from_env("AAA_STA_TRANSPORT", sta_transport, "tcp"),
 
+    %% RADIUS frontend (optional, for WLAN controllers that do not
+    %% speak Diameter STa — Hotspot 2.0 / Passpoint deployments)
+    set_from_env_bool("AAA_RADIUS_ENABLED", radius_enabled, false),
+    set_from_env_int("AAA_RADIUS_PORT", radius_port, 1812),
+    set_from_env("AAA_RADIUS_SECRET", radius_secret, "change-me"),
+
+    %% Session / authorization defaults
+    set_from_env_int("AAA_SESSION_TIMEOUT", session_timeout, 3600),
+
     %% Log level
     set_from_env("AAA_LOG_LEVEL", log_level, "info"),
 

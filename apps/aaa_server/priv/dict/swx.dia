@@ -1,0 +1,311 @@
+;;
+;; SWx Diameter application — 3GPP TS 29.273 clause 8
+;; Application-Id: 16777265   Vendor: 10415 (3GPP)
+;;
+;; Used between the 3GPP AAA Server and the HSS.
+;; Commands: MAR/MAA, SAR/SAA, PPR/PPA, RTR/RTA.
+;;
+
+@id     16777265
+@name   diameter_gen_swx
+@prefix diameter_swx
+@vendor 10415 3GPP
+
+@inherits diameter_gen_base_rfc6733
+
+@avp_types
+
+   ;; --- Cx/Sh family AVPs (TS 29.229, vendor 10415) ------------------
+   SIP-Number-Auth-Items                     607   Unsigned32       MV
+   SIP-Authentication-Scheme                 608   UTF8String       MV
+   SIP-Authenticate                          609   OctetString      MV
+   SIP-Authorization                         610   OctetString      MV
+   SIP-Authentication-Context                611   OctetString      MV
+   SIP-Auth-Data-Item                        612   Grouped          MV
+   SIP-Item-Number                           613   Unsigned32       MV
+   Confidentiality-Key                       625   OctetString      MV
+   Integrity-Key                             626   OctetString      MV
+   Server-Assignment-Type                    614   Enumerated       MV
+   User-Data                                 606   OctetString      MV
+   Deregistration-Reason                     615   Grouped          MV
+   Reason-Code                               616   Enumerated       MV
+   Reason-Info                               617   UTF8String       MV
+   3GPP-AAA-Server-Name                      318   DiameterIdentity MV
+
+   ;; --- SWx specific ------------------------------------------------
+   Non-3GPP-User-Data                       1500   Grouped           V
+   Non-3GPP-IP-Access                       1501   Enumerated        V
+   Non-3GPP-IP-Access-APN                   1502   Enumerated        V
+   RAT-Type                                 1032   Enumerated       MV
+   AN-Trusted                               1503   Enumerated        V
+
+   APN-Configuration                        1430   Grouped          MV
+   Context-Identifier                       1423   Unsigned32       MV
+   PDN-Type                                 1456   Enumerated       MV
+   Service-Selection                         493   UTF8String       M
+   AMBR                                     1435   Grouped          MV
+   Max-Requested-Bandwidth-UL                516   Unsigned32       M
+   Max-Requested-Bandwidth-DL                515   Unsigned32       M
+   Served-Party-IP-Address                   848   Address          MV
+
+   Terminal-Information                     1401   Grouped          MV
+   IMEI                                     1402   UTF8String       MV
+   Software-Version                         1403   UTF8String       MV
+   Visited-Network-Identifier                600   OctetString      MV
+
+   ;; EAP-AKA' Access Network Identity (TS 24.302 §8.1.1.2,
+   ;; TS 33.402 §6.2 / RFC 5448 §3.3). Required by the HSS to bind
+   ;; CK'/IK' to the specific access network over which the UE is
+   ;; authenticating (e.g. "WLAN" for untrusted non-3GPP / SWm).
+   Access-Network-Identifier                1263   OctetString      MV
+
+@grouped
+
+   SIP-Auth-Data-Item ::= < AVP Header: 612 10415 >
+                          [ SIP-Item-Number ]
+                          [ SIP-Authentication-Scheme ]
+                          [ SIP-Authenticate ]
+                          [ SIP-Authorization ]
+                          [ SIP-Authentication-Context ]
+                          [ Confidentiality-Key ]
+                          [ Integrity-Key ]
+                        * [ AVP ]
+
+   Deregistration-Reason ::= < AVP Header: 615 10415 >
+                             { Reason-Code }
+                             [ Reason-Info ]
+
+   APN-Configuration ::= < AVP Header: 1430 10415 >
+                         { Context-Identifier }
+                         { PDN-Type }
+                         { Service-Selection }
+                         [ AMBR ]
+                       * [ Served-Party-IP-Address ]
+                       * [ AVP ]
+
+   AMBR ::= < AVP Header: 1435 10415 >
+            { Max-Requested-Bandwidth-UL }
+            { Max-Requested-Bandwidth-DL }
+
+   Non-3GPP-User-Data ::= < AVP Header: 1500 10415 >
+                          [ Non-3GPP-IP-Access ]
+                          [ Non-3GPP-IP-Access-APN ]
+                          [ RAT-Type ]
+                          [ Session-Timeout ]
+                          [ AMBR ]
+                        * [ APN-Configuration ]
+                        * [ AVP ]
+
+   Terminal-Information ::= < AVP Header: 1401 10415 >
+                            [ IMEI ]
+                            [ Software-Version ]
+
+@define Result-Code
+
+   DIAMETER_ERROR_USER_UNKNOWN                     5001
+   DIAMETER_ERROR_IDENTITIES_DONT_MATCH            5002
+   DIAMETER_ERROR_IDENTITY_NOT_REGISTERED          5003
+   DIAMETER_ERROR_ROAMING_NOT_ALLOWED              5004
+   DIAMETER_ERROR_IDENTITY_ALREADY_REGISTERED      5005
+   DIAMETER_ERROR_AUTH_SCHEME_NOT_SUPPORTED        5006
+   DIAMETER_AUTHENTICATION_DATA_UNAVAILABLE        4181
+   DIAMETER_ERROR_USER_NO_NON_3GPP_SUBSCRIPTION    5450
+   DIAMETER_ERROR_USER_NO_APN_SUBSCRIPTION         5451
+   DIAMETER_ERROR_RAT_TYPE_NOT_ALLOWED             5452
+
+@enum Server-Assignment-Type
+   NO_ASSIGNMENT                                 0
+   REGISTRATION                                  1
+   RE_REGISTRATION                               2
+   UNREGISTERED_USER                             3
+   TIMEOUT_DEREGISTRATION                        4
+   USER_DEREGISTRATION                           5
+   TIMEOUT_DEREGISTRATION_STORE_SERVER_NAME      6
+   USER_DEREGISTRATION_STORE_SERVER_NAME         7
+   ADMINISTRATIVE_DEREGISTRATION                 8
+   AUTHENTICATION_FAILURE                        9
+   AUTHENTICATION_TIMEOUT                       10
+   DEREGISTRATION_TOO_MUCH_DATA                 11
+   AAA_USER_DATA_REQUEST                        12
+   PGW_UPDATE                                   13
+   RESTORATION                                  14
+
+@enum Reason-Code
+   PERMANENT_TERMINATION                         0
+   NEW_SERVER_ASSIGNED                           1
+   SERVER_CHANGE                                 2
+   REMOVE_S_CSCF                                 3
+
+@enum RAT-Type
+   WLAN          0
+   VIRTUAL       1
+   UTRAN      1000
+   GERAN      1001
+   EUTRAN     1004
+   HRPD       2001
+   EHRPD      2003
+
+@enum AN-Trusted
+   TRUSTED       0
+   UNTRUSTED     1
+
+@enum Non-3GPP-IP-Access
+   NON_3GPP_SUBSCRIPTION_ALLOWED    0
+   NON_3GPP_SUBSCRIPTION_BARRED     1
+
+@enum Non-3GPP-IP-Access-APN
+   NON_3GPP_APNS_ENABLE     0
+   NON_3GPP_APNS_DISABLE    1
+
+@enum PDN-Type
+   IPv4        0
+   IPv6        1
+   IPv4v6      2
+   IPv4_OR_IPv6 3
+   NON_IP      4
+
+@messages
+
+   ;; Multimedia-Auth-Request / Answer (303)
+   MAR ::= < Diameter Header: 303, REQ, PXY >
+           < Session-Id >
+           { Vendor-Specific-Application-Id }
+           { Auth-Session-State }
+           { Origin-Host }
+           { Origin-Realm }
+           { Destination-Realm }
+           { User-Name }
+           { SIP-Auth-Data-Item }
+           { SIP-Number-Auth-Items }
+           [ Destination-Host ]
+           [ 3GPP-AAA-Server-Name ]
+           [ RAT-Type ]
+           [ AN-Trusted ]
+           [ Access-Network-Identifier ]
+           [ Terminal-Information ]
+         * [ Proxy-Info ]
+         * [ Route-Record ]
+         * [ AVP ]
+
+   MAA ::= < Diameter Header: 303, PXY >
+           < Session-Id >
+           { Vendor-Specific-Application-Id }
+           { Auth-Session-State }
+           { Origin-Host }
+           { Origin-Realm }
+           [ Result-Code ]
+           [ Experimental-Result ]
+           [ User-Name ]
+           [ SIP-Number-Auth-Items ]
+         * [ SIP-Auth-Data-Item ]
+           [ 3GPP-AAA-Server-Name ]
+           [ Error-Message ]
+           [ Error-Reporting-Host ]
+           [ Failed-AVP ]
+         * [ Redirect-Host ]
+         * [ Proxy-Info ]
+         * [ AVP ]
+
+   ;; Server-Assignment-Request / Answer (301)
+   SAR ::= < Diameter Header: 301, REQ, PXY >
+           < Session-Id >
+           { Vendor-Specific-Application-Id }
+           { Auth-Session-State }
+           { Origin-Host }
+           { Origin-Realm }
+           { Destination-Realm }
+           { User-Name }
+           { Server-Assignment-Type }
+           [ Destination-Host ]
+           [ 3GPP-AAA-Server-Name ]
+           [ Service-Selection ]
+           [ Context-Identifier ]
+           [ RAT-Type ]
+           [ Visited-Network-Identifier ]
+           [ Terminal-Information ]
+         * [ Proxy-Info ]
+         * [ Route-Record ]
+         * [ AVP ]
+
+   SAA ::= < Diameter Header: 301, PXY >
+           < Session-Id >
+           { Vendor-Specific-Application-Id }
+           { Auth-Session-State }
+           { Origin-Host }
+           { Origin-Realm }
+           [ Result-Code ]
+           [ Experimental-Result ]
+           [ User-Name ]
+           [ User-Data ]
+           [ Non-3GPP-User-Data ]
+           [ 3GPP-AAA-Server-Name ]
+           [ Error-Message ]
+           [ Error-Reporting-Host ]
+           [ Failed-AVP ]
+         * [ Redirect-Host ]
+         * [ Proxy-Info ]
+         * [ AVP ]
+
+   ;; Registration-Termination-Request / Answer (304) — HSS → AAA
+   RTR ::= < Diameter Header: 304, REQ, PXY >
+           < Session-Id >
+           { Vendor-Specific-Application-Id }
+           { Auth-Session-State }
+           { Origin-Host }
+           { Origin-Realm }
+           { Destination-Host }
+           { Destination-Realm }
+           { User-Name }
+           { Deregistration-Reason }
+           [ Service-Selection ]
+         * [ Proxy-Info ]
+         * [ Route-Record ]
+         * [ AVP ]
+
+   RTA ::= < Diameter Header: 304, PXY >
+           < Session-Id >
+           { Vendor-Specific-Application-Id }
+           { Auth-Session-State }
+           { Origin-Host }
+           { Origin-Realm }
+           [ Result-Code ]
+           [ Experimental-Result ]
+           [ User-Name ]
+           [ Error-Message ]
+           [ Error-Reporting-Host ]
+           [ Failed-AVP ]
+         * [ Redirect-Host ]
+         * [ Proxy-Info ]
+         * [ AVP ]
+
+   ;; Push-Profile-Request / Answer (305) — HSS → AAA
+   PPR ::= < Diameter Header: 305, REQ, PXY >
+           < Session-Id >
+           { Vendor-Specific-Application-Id }
+           { Auth-Session-State }
+           { Origin-Host }
+           { Origin-Realm }
+           { Destination-Host }
+           { Destination-Realm }
+           { User-Name }
+           [ User-Data ]
+           [ Non-3GPP-User-Data ]
+         * [ Proxy-Info ]
+         * [ Route-Record ]
+         * [ AVP ]
+
+   PPA ::= < Diameter Header: 305, PXY >
+           < Session-Id >
+           { Vendor-Specific-Application-Id }
+           { Auth-Session-State }
+           { Origin-Host }
+           { Origin-Realm }
+           [ Result-Code ]
+           [ Experimental-Result ]
+           [ User-Name ]
+           [ Error-Message ]
+           [ Error-Reporting-Host ]
+           [ Failed-AVP ]
+         * [ Redirect-Host ]
+         * [ Proxy-Info ]
+         * [ AVP ]
