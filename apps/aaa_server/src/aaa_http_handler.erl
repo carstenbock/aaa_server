@@ -72,6 +72,12 @@ readiness_checks() ->
                 true  -> ok;
                 false -> {error, not_alive}
             end},
+        {redis,
+            %% Session state is only durable across pods if Redis is
+            %% reachable. Fail readiness if PING fails so K8s stops
+            %% routing SWm traffic to this pod and the DRA picks a
+            %% healthy peer.
+            aaa_redis:ping()},
         {diameter_service,
             case is_diameter_svc_alive() of
                 true  -> ok;

@@ -1,18 +1,29 @@
 %%%-------------------------------------------------------------------
-%%% @doc AAA session state manager.
+%%% @doc AAA session state manager (Redis-backed).
 %%%
 %%% Keeps the IMSI ↔ Session-Id dual index required by TS 29.273 so
 %%% that HSS-initiated RTR/PPR (SWx) can be correlated to the active
 %%% ePDG/PGW Diameter sessions and propagated as SWm ASR/RAR toward
 %%% the access gateway.
 %%%
-%%% Three ETS tables:
-%%%   * session_tab : Session-Id → #aaa_session
-%%%   * imsi_index  : IMSI       → [Session-Id]
-%%%   * nai_index   : NAI        → IMSI  (for pseudonym / fast-reauth)
+%%% Storage layout in Redis (prefix `aaa:' — configurable via
+%%% AAA_REDIS_KEY_PREFIX):
 %%%
-%%% All stored binaries are kept as-is — no string conversion — to
-%%% match the on-the-wire Diameter encoding.
+%%%   * aaa:sess:&lt;SessionId&gt;    STRING   term_to_binary(#aaa_session{})
+%%%   * aaa:imsi:&lt;IMSI&gt;         SET      of SessionIds for that IMSI
+%%%   * aaa:nai:&lt;NAI&gt;           STRING   permanent IMSI bound to NAI
+%%%   * aaa:iface:&lt;swm|sta|s6b&gt; SET      of SessionIds on that interface
+%%%
+%%% All writes that touch multiple keys are wrapped in MULTI/EXEC to
+%%% keep the indexes consistent. TTL is set on the session blob from
+%%% `expiry_ts' (or the configured default) and re-armed on every
+%%% update; the cleanup loop scrubs stale SET members whose session
+%%% key has already expired.
+%%%
+%%% A running gen_server process is retained only so the cleanup
+%%% timer and the readiness probe have a well-known pid to target
+%%% (existing callers `whereis(aaa_session_mgr)' and
+%%% `gen_server:stop/1' keep working).
 %%% @end
 %%%-------------------------------------------------------------------
 -module(aaa_session_mgr).
@@ -32,10 +43,13 @@
          terminate/2, code_change/3]).
 
 -define(SERVER, ?MODULE).
--define(TAB_SESS,  aaa_session_tab).
--define(TAB_IMSI,  aaa_imsi_idx_tab).
--define(TAB_NAI,   aaa_nai_idx_tab).
 -define(CLEANUP_INTERVAL_MS, 60 * 1000).
+-define(DEFAULT_TTL_SEC, 3600).
+
+%% Cap on how long the IMSI / NAI / iface index SETs are allowed to
+%% live without being refreshed. Individual sessions carry their own
+%% TTL; the index TTL is a safety-net so orphaned sets don't pile up.
+-define(INDEX_TTL_MARGIN_SEC, 600).
 
 %%====================================================================
 %% API
@@ -46,119 +60,205 @@ start_link() ->
 
 %% @doc Create a fresh session record. The caller fills in imsi,
 %% session_id, interface, and any available fields.
--spec create_session(#aaa_session{}) -> ok.
-create_session(#aaa_session{session_id = SessionId, imsi = IMSI} = S0) ->
-    Now = erlang:system_time(second),
-    S1  = S0#aaa_session{created_ts = Now, updated_ts = Now},
-    ets:insert(?TAB_SESS, {SessionId, S1}),
-    case IMSI of
-        undefined -> ok;
-        _         -> add_to_imsi_index(IMSI, SessionId)
-    end,
-    ok.
+-spec create_session(#aaa_session{}) -> ok | {error, term()}.
+create_session(#aaa_session{session_id = SessionId,
+                            imsi       = IMSI,
+                            interface  = Iface} = S0) ->
+    Now  = erlang:system_time(second),
+    S1   = S0#aaa_session{created_ts = Now, updated_ts = Now},
+    Ttl  = ttl_for(S1),
+    Blob = term_to_binary(S1, [{compressed, 3}]),
+
+    SKey = sess_key(SessionId),
+    ICmds = iface_cmds(Iface, SessionId, Ttl),
+    MCmds = imsi_cmds(IMSI, SessionId, Ttl),
+
+    case aaa_redis:multi([ [<<"SETEX">>, SKey, integer_to_binary(Ttl), Blob]
+                           | ICmds ++ MCmds ]) of
+        {ok, _} ->
+            aaa_metrics:inc(sessions_created_total),
+            ok;
+        {error, Reason} = E ->
+            logger:warning("aaa_session_mgr:create_session failed sid=~s reason=~p",
+                           [SessionId, Reason]),
+            E
+    end.
 
 %% @doc Partial update. Updates is a map of field_name => value.
--spec update_session(binary(), map()) -> ok | {error, not_found}.
+-spec update_session(binary(), map()) -> ok | {error, not_found | term()}.
 update_session(SessionId, Updates) when is_map(Updates) ->
-    case ets:lookup(?TAB_SESS, SessionId) of
-        [{_, S}] ->
+    case get_session(SessionId) of
+        {ok, S0} ->
             Now = erlang:system_time(second),
-            S1  = apply_updates(S, Updates),
+            S1  = apply_updates(S0, Updates),
             S2  = S1#aaa_session{updated_ts = Now},
-            ets:insert(?TAB_SESS, {SessionId, S2}),
-            %% Keep IMSI index consistent if IMSI changed.
-            case {S#aaa_session.imsi, S2#aaa_session.imsi} of
-                {X, X} -> ok;
-                {undefined, NewI} when NewI =/= undefined ->
-                    add_to_imsi_index(NewI, SessionId);
-                _ -> ok
-            end,
-            ok;
-        [] ->
+            Ttl = ttl_for(S2),
+            Blob = term_to_binary(S2, [{compressed, 3}]),
+            SKey = sess_key(SessionId),
+            ExtraCmds =
+                %% Rebuild the IMSI index entry if the IMSI was
+                %% attached for the first time (e.g. DER arrived
+                %% without User-Name, IMSI learned later from the
+                %% HSS MAA).
+                case {S0#aaa_session.imsi, S2#aaa_session.imsi} of
+                    {Same, Same} -> [];
+                    {undefined, NewI} when NewI =/= undefined ->
+                        imsi_cmds(NewI, SessionId, Ttl);
+                    _ -> []
+                end ++
+                %% Same for interface.
+                case {S0#aaa_session.interface, S2#aaa_session.interface} of
+                    {Same2, Same2} -> [];
+                    _ -> iface_cmds(S2#aaa_session.interface, SessionId, Ttl)
+                end,
+            case aaa_redis:multi([
+                    [<<"SETEX">>, SKey, integer_to_binary(Ttl), Blob]
+                    | ExtraCmds ]) of
+                {ok, _} -> ok;
+                {error, _} = E -> E
+            end;
+        error ->
             {error, not_found}
     end.
 
 -spec get_session(binary()) -> {ok, #aaa_session{}} | error.
 get_session(SessionId) ->
-    case ets:lookup(?TAB_SESS, SessionId) of
-        [{_, S}] -> {ok, S};
-        []       -> error
+    case aaa_redis:get(sess_key(SessionId)) of
+        {ok, undefined} -> error;
+        {ok, Bin} when is_binary(Bin) ->
+            try
+                {ok, binary_to_term(Bin, [safe])}
+            catch
+                _:_ -> error
+            end;
+        {error, Reason} ->
+            logger:warning("aaa_session_mgr:get_session redis error sid=~s reason=~p",
+                           [SessionId, Reason]),
+            error
     end.
 
 -spec get_sessions_for_imsi(binary()) -> [#aaa_session{}].
-get_sessions_for_imsi(IMSI) ->
-    case ets:lookup(?TAB_IMSI, IMSI) of
-        [{_, Ids}] ->
-            [S || Id <- Ids,
-                  [{_, S}] <- [ets:lookup(?TAB_SESS, Id)]];
-        [] -> []
-    end.
+get_sessions_for_imsi(IMSI) when is_binary(IMSI) ->
+    case aaa_redis:smembers(imsi_key(IMSI)) of
+        {ok, Ids} when is_list(Ids) ->
+            mget_sessions(Ids);
+        _ -> []
+    end;
+get_sessions_for_imsi(_) -> [].
 
 -spec sessions_by_interface(swm | sta | s6b) -> [#aaa_session{}].
 sessions_by_interface(Iface) ->
-    ets:foldl(fun({_, #aaa_session{interface = I} = S}, Acc)
-                    when I =:= Iface -> [S | Acc];
-                 (_, Acc) -> Acc
-              end, [], ?TAB_SESS).
+    case aaa_redis:smembers(iface_key(Iface)) of
+        {ok, Ids} when is_list(Ids) ->
+            mget_sessions(Ids);
+        _ -> []
+    end.
 
 -spec remove_session(binary()) -> ok.
 remove_session(SessionId) ->
-    case ets:lookup(?TAB_SESS, SessionId) of
-        [{_, #aaa_session{imsi = IMSI}}] ->
-            ets:delete(?TAB_SESS, SessionId),
-            remove_from_imsi_index(IMSI, SessionId),
+    case get_session(SessionId) of
+        {ok, #aaa_session{imsi = IMSI, interface = Iface}} ->
+            %% NB: lists:append/1 (one-level flatten) — lists:flatten/1
+            %% would dissolve each command list into its binaries and
+            %% break the MULTI pipeline.
+            Cmds = lists:append([
+                [[<<"DEL">>, sess_key(SessionId)]],
+                case IMSI of
+                    undefined -> [];
+                    _ -> [[<<"SREM">>, imsi_key(IMSI), SessionId]]
+                end,
+                case Iface of
+                    undefined -> [];
+                    _ -> [[<<"SREM">>, iface_key(Iface), SessionId]]
+                end
+            ]),
+            _ = aaa_redis:multi(Cmds),
             ok;
-        [] ->
+        error ->
+            _ = aaa_redis:del(sess_key(SessionId)),
             ok
     end.
 
+%% @doc Remove every session for an IMSI and return the list that was
+%% removed (callers in `aaa_swx_client' use the list to emit SWm ASR
+%% toward the ePDG / PGW).
 -spec remove_sessions_for_imsi(binary()) -> [#aaa_session{}].
-remove_sessions_for_imsi(IMSI) ->
+remove_sessions_for_imsi(IMSI) when is_binary(IMSI) ->
     Sessions = get_sessions_for_imsi(IMSI),
-    lists:foreach(fun(#aaa_session{session_id = Sid}) ->
-                      ets:delete(?TAB_SESS, Sid)
-                  end, Sessions),
-    ets:delete(?TAB_IMSI, IMSI),
-    %% Purge any NAI bindings pointing to this IMSI.
-    ets:match_delete(?TAB_NAI, {'_', IMSI}),
-    Sessions.
+    DelKeys  = [sess_key(S#aaa_session.session_id) || S <- Sessions],
+    Ifaces   = lists:usort([S#aaa_session.interface ||
+                            S <- Sessions,
+                            S#aaa_session.interface =/= undefined]),
+    %% Remove per-interface set entries too. lists:append/1 flattens
+    %% exactly one level so each command stays a list of binaries.
+    Cmds = lists:append([
+        case DelKeys of
+            [] -> [];
+            _  -> [[<<"DEL">> | DelKeys]]
+        end,
+        [[<<"DEL">>, imsi_key(IMSI)]],
+        [[<<"SREM">>, iface_key(I)] ++ [S#aaa_session.session_id
+                                          || S <- Sessions,
+                                             S#aaa_session.interface =:= I]
+         || I <- Ifaces, Sessions =/= []]
+    ]),
+    case Cmds of
+        [] -> ok;
+        _  -> _ = aaa_redis:multi(Cmds), ok
+    end,
+    Sessions;
+remove_sessions_for_imsi(_) -> [].
 
 %% @doc Bind a pseudonym / fast-reauth NAI to an IMSI so future
 %% authentication attempts starting from that NAI can look up the
 %% underlying permanent identity.
 -spec bind_nai(binary(), binary()) -> ok.
-bind_nai(NAI, IMSI) ->
-    ets:insert(?TAB_NAI, {NAI, IMSI}),
-    ok.
+bind_nai(NAI, IMSI) when is_binary(NAI), is_binary(IMSI) ->
+    Ttl = default_ttl(),
+    case aaa_redis:setex(nai_key(NAI), Ttl, IMSI) of
+        ok             -> ok;
+        {error, _} = E ->
+            logger:warning("aaa_session_mgr:bind_nai redis error: ~p", [E]),
+            ok
+    end.
 
 -spec resolve_nai(binary()) -> {ok, binary()} | error.
-resolve_nai(NAI) ->
-    case ets:lookup(?TAB_NAI, NAI) of
-        [{_, IMSI}] -> {ok, IMSI};
-        []          -> error
-    end.
+resolve_nai(NAI) when is_binary(NAI) ->
+    case aaa_redis:get(nai_key(NAI)) of
+        {ok, undefined}              -> error;
+        {ok, IMSI} when is_binary(IMSI) -> {ok, IMSI};
+        _                            -> error
+    end;
+resolve_nai(_) -> error.
 
 -spec count() -> non_neg_integer().
 count() ->
-    safe_info_size(?TAB_SESS).
+    count(swm) + count(sta) + count(s6b).
 
 -spec count(swm | sta | s6b) -> non_neg_integer().
 count(Iface) ->
-    length(sessions_by_interface(Iface)).
+    case aaa_redis:scard(iface_key(Iface)) of
+        {ok, Bin} when is_binary(Bin) -> binary_to_integer(Bin);
+        {ok, N} when is_integer(N)    -> N;
+        _                             -> 0
+    end.
 
+%% @doc Full listing — intended for debugging and the HTTP /status
+%% endpoint. SCANs through the session keyspace; not used on the hot
+%% Diameter path.
 -spec list_all() -> [#aaa_session{}].
 list_all() ->
-    [S || {_, S} <- ets:tab2list(?TAB_SESS)].
+    Pattern = iolist_to_binary([aaa_redis:key_prefix(), <<"sess:*">>]),
+    Ids = scan_keys(Pattern),
+    [S || K <- Ids,
+          Sid <- [strip_sess_prefix(K)],
+          {ok, S} <- [get_session(Sid)]].
 
 %%====================================================================
 %% gen_server
 %%====================================================================
 
 init([]) ->
-    ets:new(?TAB_SESS, [named_table, public, set, {write_concurrency, true},
-                        {read_concurrency, true}]),
-    ets:new(?TAB_IMSI, [named_table, public, set, {write_concurrency, true}]),
-    ets:new(?TAB_NAI,  [named_table, public, set, {write_concurrency, true}]),
     erlang:send_after(?CLEANUP_INTERVAL_MS, self(), cleanup),
     {ok, #{}}.
 
@@ -166,19 +266,14 @@ handle_call(_Req, _From, State) -> {reply, ok, State}.
 handle_cast(_Msg, State)        -> {noreply, State}.
 
 handle_info(cleanup, State) ->
-    Now = erlang:system_time(second),
-    Expired = ets:foldl(
-        fun({Sid, #aaa_session{expiry_ts = T}}, Acc)
-                when is_integer(T), T =< Now ->
-            [Sid | Acc];
-           (_, Acc) -> Acc
-        end, [], ?TAB_SESS),
-    lists:foreach(fun remove_session/1, Expired),
-    case Expired of
-        [] -> ok;
-        L  -> logger:info("AAA session cleanup: expired=~B", [length(L)])
+    try
+        prune_interface_sets()
+    catch
+        Class:Reason:Stack ->
+            logger:warning("aaa_session_mgr cleanup failed ~p:~p ~P",
+                           [Class, Reason, Stack, 10])
     end,
-    aaa_metrics:gauge_set(active_sessions, count()),
+    refresh_active_gauge(),
     erlang:send_after(?CLEANUP_INTERVAL_MS, self(), cleanup),
     {noreply, State};
 handle_info(_Info, State) -> {noreply, State}.
@@ -187,36 +282,53 @@ terminate(_Reason, _State) -> ok.
 code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
 %%====================================================================
+%% Key helpers
+%%====================================================================
+
+sess_key(Sid)            -> aaa_redis:key([<<"sess:">>, Sid]).
+imsi_key(IMSI)           -> aaa_redis:key([<<"imsi:">>, IMSI]).
+nai_key(NAI)             -> aaa_redis:key([<<"nai:">>, NAI]).
+iface_key(I) when is_atom(I) ->
+    aaa_redis:key([<<"iface:">>, atom_to_binary(I, utf8)]).
+
+strip_sess_prefix(K) when is_binary(K) ->
+    Prefix = iolist_to_binary([aaa_redis:key_prefix(), <<"sess:">>]),
+    PSize  = byte_size(Prefix),
+    case K of
+        <<Prefix:PSize/binary, Rest/binary>> -> Rest;
+        _ -> K
+    end.
+
+%%====================================================================
 %% Internal
 %%====================================================================
 
-safe_info_size(Tab) ->
-    case ets:info(Tab, size) of
-        undefined -> 0;
-        N         -> N
+ttl_for(#aaa_session{expiry_ts = T}) when is_integer(T), T > 0 ->
+    Now = erlang:system_time(second),
+    case T - Now of
+        N when N > 0 -> N;
+        _            -> default_ttl()
+    end;
+ttl_for(_) ->
+    default_ttl().
+
+default_ttl() ->
+    case aaa_config:get(session_timeout, ?DEFAULT_TTL_SEC) of
+        N when is_integer(N), N > 0 -> N;
+        _                           -> ?DEFAULT_TTL_SEC
     end.
 
-add_to_imsi_index(IMSI, SessionId) ->
-    Cur = case ets:lookup(?TAB_IMSI, IMSI) of
-        [{_, L}] -> L;
-        []       -> []
-    end,
-    New = case lists:member(SessionId, Cur) of
-        true  -> Cur;
-        false -> [SessionId | Cur]
-    end,
-    ets:insert(?TAB_IMSI, {IMSI, New}).
+imsi_cmds(undefined, _Sid, _Ttl) -> [];
+imsi_cmds(IMSI, Sid, Ttl) ->
+    K = imsi_key(IMSI),
+    [ [<<"SADD">>, K, Sid],
+      [<<"EXPIRE">>, K, integer_to_binary(Ttl + ?INDEX_TTL_MARGIN_SEC)] ].
 
-remove_from_imsi_index(undefined, _) -> ok;
-remove_from_imsi_index(IMSI, SessionId) ->
-    case ets:lookup(?TAB_IMSI, IMSI) of
-        [{_, L}] ->
-            case [X || X <- L, X =/= SessionId] of
-                []   -> ets:delete(?TAB_IMSI, IMSI);
-                New  -> ets:insert(?TAB_IMSI, {IMSI, New})
-            end;
-        [] -> ok
-    end.
+iface_cmds(undefined, _Sid, _Ttl) -> [];
+iface_cmds(Iface, Sid, Ttl) ->
+    K = iface_key(Iface),
+    [ [<<"SADD">>, K, Sid],
+      [<<"EXPIRE">>, K, integer_to_binary(Ttl + ?INDEX_TTL_MARGIN_SEC)] ].
 
 apply_updates(S, Updates) ->
     maps:fold(fun set_field/3, S, Updates).
@@ -260,3 +372,87 @@ field_index(ambr_dl)             -> #aaa_session.ambr_dl;
 field_index(pgw_id)              -> #aaa_session.pgw_id;
 field_index(expiry_ts)           -> #aaa_session.expiry_ts;
 field_index(_)                   -> undefined.
+
+%% @doc Pipelined GET of every SessionId referenced by an index set.
+%% Uses MGET so fetching all sessions for one IMSI or one interface
+%% is a single Redis round-trip. Skips members whose blob has already
+%% expired (the index set is scrubbed lazily by the cleanup timer).
+mget_sessions([]) -> [];
+mget_sessions(Ids) ->
+    case aaa_redis:q([<<"MGET">> | [sess_key(Id) || Id <- Ids]]) of
+        {ok, Blobs} when is_list(Blobs), length(Blobs) =:= length(Ids) ->
+            [S || {_Id, Blob} <- lists:zip(Ids, Blobs),
+                  is_binary(Blob),
+                  {ok, S} <- [safe_binary_to_session(Blob)]];
+        _ ->
+            %% Fallback: issue individual GETs so the API remains
+            %% robust if MGET is unavailable for some reason.
+            lists:foldr(
+                fun(Id, Acc) ->
+                    case get_session(Id) of
+                        {ok, S} -> [S | Acc];
+                        error   -> Acc
+                    end
+                end, [], Ids)
+    end.
+
+safe_binary_to_session(Blob) ->
+    try
+        {ok, binary_to_term(Blob, [safe])}
+    catch
+        _:_ -> error
+    end.
+
+%% @doc Iterate SCAN cursors for a match pattern and return the
+%% collected keys. Bounded at 10k keys to avoid pathological runtimes.
+scan_keys(Pattern) ->
+    scan_keys(<<"0">>, Pattern, [], 0).
+
+scan_keys(_Cursor, _Pattern, Acc, N) when N >= 10000 ->
+    lists:append(lists:reverse(Acc));
+scan_keys(Cursor, Pattern, Acc, N) ->
+    case aaa_redis:q([<<"SCAN">>, Cursor,
+                      <<"MATCH">>, Pattern,
+                      <<"COUNT">>, <<"200">>]) of
+        {ok, [NextCursor, Keys]} when is_list(Keys) ->
+            case NextCursor of
+                <<"0">> ->
+                    lists:append(lists:reverse([Keys | Acc]));
+                _ ->
+                    scan_keys(NextCursor, Pattern,
+                              [Keys | Acc], N + length(Keys))
+            end;
+        _ ->
+            lists:append(lists:reverse(Acc))
+    end.
+
+%% Periodic lightweight GC: walk each interface set, drop SessionIds
+%% whose blob has already expired so SCARD-based metrics stay honest.
+prune_interface_sets() ->
+    lists:foreach(fun prune_iface/1, [swm, sta, s6b]).
+
+prune_iface(Iface) ->
+    case aaa_redis:smembers(iface_key(Iface)) of
+        {ok, []}   -> ok;
+        {ok, Ids}  -> prune_iface_ids(Iface, Ids);
+        _          -> ok
+    end.
+
+prune_iface_ids(Iface, Ids) ->
+    case aaa_redis:q([<<"MGET">> | [sess_key(Id) || Id <- Ids]]) of
+        {ok, Blobs} when is_list(Blobs), length(Blobs) =:= length(Ids) ->
+            Dead = [Id || {Id, undefined} <- lists:zip(Ids, Blobs)],
+            remove_dead_members(Iface, Dead);
+        _ -> ok
+    end.
+
+remove_dead_members(_Iface, []) -> ok;
+remove_dead_members(Iface, Dead) ->
+    IKey = iface_key(Iface),
+    _ = aaa_redis:q([<<"SREM">>, IKey | Dead]),
+    ok.
+
+refresh_active_gauge() ->
+    Total = count(),
+    aaa_metrics:gauge_set(active_sessions, Total),
+    ok.

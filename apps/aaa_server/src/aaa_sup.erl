@@ -24,6 +24,12 @@ init([]) ->
     SupFlags = #{strategy => one_for_one, intensity => 10, period => 60},
 
     CoreChildren = [
+        %% Shared session store comes first — session_mgr, swm_server,
+        %% etc. depend on it being available for reads/writes.
+        #{id => aaa_redis,
+          start => {aaa_redis, start_link, []},
+          restart => permanent, shutdown => 10000, type => supervisor},
+
         #{id => aaa_session_mgr,
           start => {aaa_session_mgr, start_link, []},
           restart => permanent, shutdown => 5000, type => worker},

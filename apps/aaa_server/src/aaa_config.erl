@@ -48,6 +48,19 @@ init() ->
     %% Session / authorization defaults
     set_from_env_int("AAA_SESSION_TIMEOUT", session_timeout, 3600),
 
+    %% Redis-backed session store (HA across multiple AAA pods).
+    %% Host defaults to the in-cluster Redis StatefulSet service
+    %% shipped by aaa-server-chart; override with AAA_REDIS_HOST to
+    %% point at an external Redis (e.g. managed service).
+    set_from_env("AAA_REDIS_HOST", redis_host, "aaa-redis"),
+    set_from_env_int("AAA_REDIS_PORT", redis_port, 6379),
+    set_from_env_int("AAA_REDIS_DB", redis_db, 0),
+    set_from_env("AAA_REDIS_PASSWORD", redis_password, ""),
+    set_from_env_int("AAA_REDIS_POOL_SIZE", redis_pool_size, 8),
+    set_from_env_int("AAA_REDIS_CONNECT_TIMEOUT", redis_connect_timeout, 5000),
+    set_from_env_int("AAA_REDIS_RECONNECT_SLEEP", redis_reconnect_sleep, 500),
+    set_from_env("AAA_REDIS_KEY_PREFIX", redis_key_prefix, "aaa:"),
+
     %% Log level
     set_from_env("AAA_LOG_LEVEL", log_level, "info"),
 
