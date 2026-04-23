@@ -44,9 +44,31 @@
    PDN-Type                                 1456   Enumerated       MV
    Service-Selection                         493   UTF8String       M
    AMBR                                     1435   Grouped          MV
-   Max-Requested-Bandwidth-UL                516   Unsigned32       M
-   Max-Requested-Bandwidth-DL                515   Unsigned32       M
+   ;; 3GPP TS 29.214 §5.3.14/15: Max-Requested-Bandwidth-UL/DL are
+   ;; vendor-3GPP AVPs and travel with the V-bit set when carried inside
+   ;; AMBR on SWx. Declaring them as M-only (no V) makes the Erlang
+   ;; diameter decoder raise 5001 DIAMETER_AVP_UNSUPPORTED for AVP 516,
+   ;; which cascades up through AMBR → Non-3GPP-User-Data and causes the
+   ;; whole grouped AVP 1500 to be stripped from the SAA. That's what
+   ;; the PGW/SMF ultimately sees as DIAMETER_ERROR_NO_NON_3GPP_USER_DATA
+   ;; (5451) → S2b Create-Session rejected with GTP cause 125.
+   Max-Requested-Bandwidth-UL                516   Unsigned32       MV
+   Max-Requested-Bandwidth-DL                515   Unsigned32       MV
    Served-Party-IP-Address                   848   Address          MV
+
+   ;; --- EPS-Subscribed-QoS-Profile (TS 29.272 §7.3.37) ---------------
+   ;; PyHSS reuses its S6a APN-Configuration builder for the SWx SAA, so
+   ;; these AVPs appear inside APN-Configuration (1430) with the M-bit
+   ;; set. Without @avp_types entries the diameter decoder's strict-mbit
+   ;; check drops the entire Non-3GPP-User-Data grouped AVP, causing the
+   ;; PGW/SMF to see DIAMETER_ERROR_NO_NON_3GPP_USER_DATA (5451) and
+   ;; reject the S2b Create-Session with GTP cause 125.
+   EPS-Subscribed-QoS-Profile               1431   Grouped          MV
+   QoS-Class-Identifier                     1028   Unsigned32       MV
+   Allocation-Retention-Priority            1034   Grouped           V
+   Priority-Level                           1046   Unsigned32        V
+   Pre-emption-Capability                   1047   Unsigned32        V
+   Pre-emption-Vulnerability                1048   Unsigned32        V
 
    Terminal-Information                     1401   Grouped          MV
    IMEI                                     1402   UTF8String       MV
@@ -80,6 +102,7 @@
                          { PDN-Type }
                          { Service-Selection }
                          [ AMBR ]
+                         [ EPS-Subscribed-QoS-Profile ]
                        * [ Served-Party-IP-Address ]
                        * [ AVP ]
 
@@ -87,12 +110,24 @@
             { Max-Requested-Bandwidth-UL }
             { Max-Requested-Bandwidth-DL }
 
+   ;; EPS-Subscribed-QoS-Profile (TS 29.272 §7.3.37) — nested within
+   ;; APN-Configuration when PyHSS reuses its S6a builder on SWx.
+   EPS-Subscribed-QoS-Profile ::= < AVP Header: 1431 10415 >
+                                  { QoS-Class-Identifier }
+                                  { Allocation-Retention-Priority }
+
+   Allocation-Retention-Priority ::= < AVP Header: 1034 10415 >
+                                     { Priority-Level }
+                                     [ Pre-emption-Capability ]
+                                     [ Pre-emption-Vulnerability ]
+
    Non-3GPP-User-Data ::= < AVP Header: 1500 10415 >
                           [ Non-3GPP-IP-Access ]
                           [ Non-3GPP-IP-Access-APN ]
                           [ RAT-Type ]
                           [ Session-Timeout ]
                           [ AMBR ]
+                          [ Context-Identifier ]
                         * [ APN-Configuration ]
                         * [ AVP ]
 

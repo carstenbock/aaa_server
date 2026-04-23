@@ -37,8 +37,9 @@
    Context-Identifier                       1423   Unsigned32       MV
    PDN-Type                                 1456   Enumerated       MV
    AMBR                                     1435   Grouped          MV
-   Max-Requested-Bandwidth-UL                516   Unsigned32       M
-   Max-Requested-Bandwidth-DL                515   Unsigned32       M
+   ;; 3GPP AVPs — vendor 10415, travel with V+M set on the wire.
+   Max-Requested-Bandwidth-UL                516   Unsigned32       MV
+   Max-Requested-Bandwidth-DL                515   Unsigned32       MV
    Served-Party-IP-Address                   848   Address          MV
 
    3GPP-AAA-Server-Name                      318   DiameterIdentity MV

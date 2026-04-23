@@ -109,8 +109,9 @@ handle_aar(AVPs, Caps) ->
     aaa_session_mgr:create_session(Rec),
 
     %% Fetch cached subscription, or pull fresh from HSS via SAR 13.
+    CacheLookup = find_cached_profile(IMSI),
     {Non3gpp, APNs} =
-        case find_cached_profile(IMSI) of
+        case CacheLookup of
             {ok, UD, A} -> {UD, A};
             none        -> fetch_from_hss(IMSI, APN)
         end,
@@ -209,6 +210,12 @@ fetch_from_hss(IMSI, APN) ->
 
 select_apn(undefined, [First | _]) -> First;
 select_apn(undefined, _)           -> undefined;
+%% Erlang's diameter decoder wraps arity 0..1 AVPs in a one-element list,
+%% so the 'Service-Selection' AVP from the PGW's S6b AAR arrives as
+%% [<<"ims">>] while the Service-Selection stored inside each decoded
+%% APN-Configuration proplist is the bare binary <<"ims">>. Unwrap.
+select_apn([APN], APNs) -> select_apn(APN, APNs);
+select_apn([], _)       -> undefined;
 select_apn(APN, APNs) ->
     Match = [A || A <- APNs,
                   proplists:get_value('Service-Selection', A) =:= APN],
@@ -224,22 +231,65 @@ select_apn(APN, APNs) ->
 aaa_ok(Sid, IMSI, AuthReqType, APNConfig) ->
     OH = to_bin(aaa_config:get(origin_host, "aaa.localdomain")),
     OR = to_bin(aaa_config:get(origin_realm, "localdomain")),
-    Base = ['AAA',
-            {'Session-Id', Sid},
-            {'Auth-Application-Id', ?S6B_APP_ID},
-            {'Result-Code', 2001},
-            {'Origin-Host', OH},
-            {'Origin-Realm', OR},
-            {'Auth-Request-Type', AuthReqType},
-            {'User-Name', IMSI},
-            {'Session-Timeout', session_timeout()},
-            {'MIP6-Feature-Vector', mip6_feature_vector()},
-            {'3GPP-AAA-Server-Name', OH},
-            {'APN-Configuration', APNConfig}],
-    case proplists:get_value('AMBR', APNConfig) of
+    %% Build an APN-Configuration proplist that matches what the S6b
+    %% dictionary (AVP 1430) knows about, and in the exact shape the
+    %% Erlang diameter encoder expects:
+    %%   - APN-Configuration (arity 0..1 in AAA) must be wrapped in a
+    %%     one-element list → [Proplist].
+    %%   - The grouped sub-AVP AMBR (arity 0..1 inside APN-Configuration)
+    %%     must also be wrapped → {'AMBR', [Proplist]}.
+    %%   - Everything the HSS sent us on SWx that isn't in s6b.dia
+    %%     (EPS-Subscribed-QoS-Profile, MIP6-*, …) has to be stripped,
+    %%     otherwise the encoder raises {badmatch,undefined} in
+    %%     diameter_codec:enc/3, no bytes get on the wire, and the PGW
+    %%     times out locally → freeDiameter surfaces 3002
+    %%     DIAMETER_UNABLE_TO_DELIVER (this was the original symptom).
+    SafeAPN = build_s6b_apn(APNConfig),
+    BareIMSI = unwrap_user_name(IMSI),
+    ['AAA',
+     {'Session-Id', Sid},
+     {'Auth-Application-Id', ?S6B_APP_ID},
+     {'Result-Code', 2001},
+     {'Origin-Host', OH},
+     {'Origin-Realm', OR},
+     {'Auth-Request-Type', AuthReqType},
+     {'User-Name', BareIMSI},
+     {'Session-Timeout', session_timeout()},
+     {'MIP6-Feature-Vector', mip6_feature_vector()},
+     {'3GPP-AAA-Server-Name', OH},
+     {'APN-Configuration', [SafeAPN]}].
+
+%% The SWx decoder delivers 'User-Name' from the AAR as a one-element
+%% list ([<<"…">>]) because of its arity-0..1 declaration. For the
+%% outgoing AAA we want the bare binary the s6b dict expects.
+unwrap_user_name([B | _]) when is_binary(B) -> B;
+unwrap_user_name(B) when is_binary(B)       -> B;
+unwrap_user_name(_)                          -> <<>>.
+
+%% Build a clean APN-Configuration proplist from what the HSS returned
+%% on SWx. Only the four AVPs that s6b.dia lists under AVP 1430 survive
+%% (Context-Identifier, PDN-Type, Service-Selection, AMBR) and the AMBR
+%% sub-AVP is re-wrapped to match the encoder's 0..1 arity expectation.
+build_s6b_apn(APNConfig) when is_list(APNConfig) ->
+    CtxId  = proplists:get_value('Context-Identifier', APNConfig, 1),
+    PdnT   = proplists:get_value('PDN-Type', APNConfig, 0),
+    SvcSel = proplists:get_value('Service-Selection', APNConfig, <<>>),
+    Base = [{'Context-Identifier', CtxId},
+            {'PDN-Type', PdnT},
+            {'Service-Selection', SvcSel}],
+    case normalise_ambr(proplists:get_value('AMBR', APNConfig)) of
         undefined -> Base;
-        AMBR      -> Base ++ [{'AMBR', AMBR}]
-    end.
+        Flat      -> Base ++ [{'AMBR', [Flat]}]
+    end;
+build_s6b_apn(_) ->
+    [{'Context-Identifier', 1}, {'PDN-Type', 0}, {'Service-Selection', <<>>}].
+
+%% The HSS-derived AMBR arrives double-list-wrapped — [[{UL,X},{DL,Y}]] —
+%% from the SWx decoder (0..1 wrap of a grouped AVP). Peel the outer
+%% list so the encoder sees a flat proplist; we re-wrap it in the caller.
+normalise_ambr([Inner | _]) when is_list(Inner) -> Inner;
+normalise_ambr(L) when is_list(L)               -> L;
+normalise_ambr(_)                                -> undefined.
 
 aaa_fail(Sid, IMSI, AuthReqType, ResultCode) ->
     OH = to_bin(aaa_config:get(origin_host, "aaa.localdomain")),

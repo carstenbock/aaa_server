@@ -380,8 +380,7 @@ split_auth(_) ->
     {<<>>, <<>>}.
 
 parse_saa(['SAA' | AVPs]) ->
-    ResultCode = result_code(AVPs),
-    case ResultCode of
+    case result_code(AVPs) of
         2001 ->
             UserData = proplists:get_value('Non-3GPP-User-Data', AVPs, []),
             APNs     = extract_apns(UserData),
@@ -394,6 +393,14 @@ parse_saa(['SAA' | AVPs]) ->
 parse_saa(_) ->
     {error, invalid_answer}.
 
+%% Erlang's diameter decoder delivers AVP 1500 (Non-3GPP-User-Data) as
+%% [GroupedProplist] because its arity in SAA is `[0..1]`. So UserData
+%% is typically `[[{'APN-Configuration', ListOfApnProplists}, ...]]` —
+%% a one-element list wrapping the inner grouped proplist. Older code
+%% iterated the outer list looking for `{'APN-Configuration', _}` tuples
+%% at the top, which never matched and silently returned [].
+extract_apns([Inner | _]) when is_list(Inner) ->
+    proplists:get_value('APN-Configuration', Inner, []);
 extract_apns(UserData) when is_list(UserData) ->
     [APN || {'APN-Configuration', APN} <- UserData];
 extract_apns(_) ->
