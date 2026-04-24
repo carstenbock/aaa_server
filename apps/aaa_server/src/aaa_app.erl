@@ -11,7 +11,6 @@
 
 start(_StartType, _StartArgs) ->
     logger:info("Starting 3GPP AAA Server"),
-    %% #region agent log
     %% Validate the pure-Erlang SHA-1 compression / FIPS 186-2 PRF
     %% implementation on startup so a broken build surfaces immediately
     %% (instead of appearing later as a silent EAP-AKA key-derivation
@@ -22,7 +21,6 @@ start(_StartType, _StartArgs) ->
         {error, Reason} ->
             logger:error("aaa_eap_crypto selftest FAILED: ~p", [Reason])
     end,
-    %% #endregion
     aaa_config:init(),
     aaa_metrics:init(),
     aaa_sup:start_link().

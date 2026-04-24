@@ -30,9 +30,7 @@
     %% Exposed for unit tests and other RFC 4187/RFC 5448 consumers.
     fips186_2_prf/2,
     sha1_compress/2,
-    %% #region agent log
     selftest/0
-    %% #endregion
 ]).
 
 %%====================================================================
@@ -299,7 +297,6 @@ rol32(X, N) when N > 0, N < 32 ->
     M = X band 16#FFFFFFFF,
     ((M bsl N) bor (M bsr (32 - N))) band 16#FFFFFFFF.
 
-%% #region agent log
 %%====================================================================
 %% Self-test for sha1_compress / fips186_2_prf.
 %%
@@ -339,4 +336,3 @@ sha1_pad_block(M) when byte_size(M) =< 55 ->
     LenBits = byte_size(M) * 8,
     PadZeros = (55 - byte_size(M)) * 8,
     <<M/binary, 16#80, 0:PadZeros, LenBits:64/big>>.
-%% #endregion
