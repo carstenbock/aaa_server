@@ -59,17 +59,10 @@ handle_error(Reason, _Req, _Svc, _Peer) ->
     {error, Reason}.
 
 %% Incoming request dispatcher.
-handle_request(#diameter_packet{msg = Msg, header = Hdr, errors = Errors,
-                                avps = Avps} = _Pkt, _Svc,
+handle_request(#diameter_packet{msg = Msg, header = Hdr} = _Pkt, _Svc,
                {_PeerRef, Caps}) ->
     Start = erlang:monotonic_time(millisecond),
     aaa_metrics:inc(swm_requests_total),
-    %% #region agent log
-    logger:notice("SWm handle_request: hdr=~P errors=~P msg=~P "
-                  "avps_count=~p",
-                  [Hdr, 10, Errors, 12, Msg, 10,
-                   case Avps of L when is_list(L) -> length(L); _ -> 0 end]),
-    %% #endregion
     try
         Reply = dispatch(Msg, Hdr, Caps),
         aaa_metrics:observe_latency(swm_latency,
@@ -108,25 +101,9 @@ handle_der(AVPs, Caps) ->
     EapPayload = avp('EAP-Payload', AVPs, <<>>),
     PeerHost   = origin_host(Caps),
 
-    {Session0, SessionSource} =
+    {Session0, _SessionSource} =
         load_or_create_session_tagged(SessionId, AVPs, PeerHost),
-    %% #region agent log
-    logger:notice("SWm handle_der: session_id=~s source=~p eap_len=~p "
-                  "imsi=~p eap_state=~p method=~p xres_len=~p k_aut_len=~p",
-                  [SessionId, SessionSource,
-                   case EapPayload of B when is_binary(B) -> byte_size(B);
-                                       _ -> undefined end,
-                   Session0#aaa_session.imsi,
-                   Session0#aaa_session.eap_state,
-                   Session0#aaa_session.method,
-                   bin_len(Session0#aaa_session.xres),
-                   bin_len(Session0#aaa_session.k_aut)]),
-    %% #endregion
     Result = aaa_eap_relay:process(swm, EapPayload, Session0),
-    %% #region agent log
-    logger:notice("SWm handle_der: relay_result=~P",
-                  [classify_relay(Result), 8]),
-    %% #endregion
     case Result of
         {challenge, ResponseEAP, Updates} ->
             aaa_session_mgr:update_session(SessionId, Updates),
@@ -146,25 +123,6 @@ handle_der(AVPs, Caps) ->
             aaa_metrics:inc(swm_auth_failure_total),
             {reply, dea_failure(SessionId, <<>>, 4181)}
     end.
-
-%% #region agent log
-classify_relay({challenge, EAP, _U}) ->
-    {challenge, eap_size(EAP)};
-classify_relay({success, EAP, MSK, _U}) ->
-    {success, eap_size(EAP),
-     case MSK of M when is_binary(M) -> byte_size(M); _ -> 0 end};
-classify_relay({failure, EAP, Why}) ->
-    {failure, eap_size(EAP), Why};
-classify_relay({notification, EAP}) ->
-    {notification, eap_size(EAP)};
-classify_relay({error, R}) ->
-    {error, R};
-classify_relay(Other) ->
-    {other, Other}.
-
-eap_size(B) when is_binary(B) -> byte_size(B);
-eap_size(_) -> undefined.
-%% #endregion
 
 %%====================================================================
 %% AAR — authorization
@@ -399,11 +357,6 @@ load_or_create_session_tagged(SessionId, AVPs, PeerHost) ->
             ok = aaa_session_mgr:create_session(Rec),
             {Rec, created}
     end.
-
-%% #region agent log
-bin_len(B) when is_binary(B) -> byte_size(B);
-bin_len(_)                   -> 0.
-%% #endregion
 
 %%====================================================================
 %% Helpers

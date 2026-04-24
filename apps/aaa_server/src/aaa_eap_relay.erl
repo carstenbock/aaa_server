@@ -98,21 +98,9 @@ resolve_identity(NAI) ->
 dispatch(Iface, #{code := ?EAP_CODE_RESPONSE, type := ?EAP_TYPE_IDENTITY,
                   data := IdData, id := Id}, _Raw, S0) ->
     NAI = strip_null(IdData),
-    %% #region agent log
-    Parsed = (catch aaa_nai:parse(NAI)),
-    logger:notice("EAP Identity received: nai=~s parsed=~p", [NAI, Parsed]),
-    dbg_log(<<"aaa_eap_relay.erl:93">>,
-            <<"EAP Identity received">>,
-            #{nai => NAI, parsed => Parsed, iface => Iface}, <<"H2">>),
-    %% #endregion
     case resolve_identity(NAI) of
         {ok, IMSI} ->
             Method = method_from_nai(NAI),
-            %% #region agent log
-            dbg_log(<<"aaa_eap_relay.erl:96">>,
-                    <<"Identity resolved">>,
-                    #{nai => NAI, imsi => IMSI, method => Method}, <<"H2">>),
-            %% #endregion
             start_challenge(Iface, Method, IMSI, NAI, Id, S0);
         error ->
             %% Unknown NAI → ask for permanent id. Use AKA' by default;
@@ -205,15 +193,13 @@ dispatch(_Iface, #{code := ?EAP_CODE_RESPONSE, type := T,
 %% stored keys. Return a failure rather than a generic catch-all so the
 %% peer gets a deterministic DEA and the operator sees the real cause.
 dispatch(_Iface, #{code := ?EAP_CODE_RESPONSE, type := T,
-                   subtype := ?AKA_CHALLENGE} = Pkt,
-         Raw, S0)
+                   subtype := ?AKA_CHALLENGE},
+         _Raw, S0)
   when T =:= ?EAP_TYPE_AKA; T =:= ?EAP_TYPE_AKA_PRIME ->
     aaa_metrics:inc(eap_relay_failure_total),
-    %% #region agent log
     logger:warning("EAP-AKA~s Challenge-Response on session without keys: "
                    "session_id=~s imsi=~p eap_state=~p method=~p "
-                   "xres=~p k_aut_len=~p rand_len=~p autn_len=~p "
-                   "raw_hex=~s len=~p pkt=~P",
+                   "xres_present=~p k_aut_len=~p rand_len=~p autn_len=~p",
                    [case T of
                         ?EAP_TYPE_AKA_PRIME -> "'";
                         _                   -> ""
@@ -222,38 +208,26 @@ dispatch(_Iface, #{code := ?EAP_CODE_RESPONSE, type := T,
                     S0#aaa_session.imsi,
                     S0#aaa_session.eap_state,
                     S0#aaa_session.method,
-                    type_tag(S0#aaa_session.xres),
+                    is_binary(S0#aaa_session.xres),
                     bsize(S0#aaa_session.k_aut),
                     bsize(S0#aaa_session.rand),
-                    bsize(S0#aaa_session.autn),
-                    hex(Raw), byte_size(Raw), Pkt, 12]),
-    %% #endregion
+                    bsize(S0#aaa_session.autn)]),
     {error, challenge_without_session_state};
 
-dispatch(_Iface, Pkt, Raw, S0) ->
-    %% #region agent log
-    logger:notice("EAP dispatch unexpected: raw_hex=~s len=~p pkt=~P "
-                  "session_id=~s imsi=~p eap_state=~p method=~p "
-                  "xres=~p k_aut_len=~p",
-                  [hex(Raw), byte_size(Raw), Pkt, 12,
-                   S0#aaa_session.session_id,
-                   S0#aaa_session.imsi,
-                   S0#aaa_session.eap_state,
-                   S0#aaa_session.method,
-                   type_tag(S0#aaa_session.xres),
-                   bsize(S0#aaa_session.k_aut)]),
-    %% #endregion
+dispatch(_Iface, Pkt, _Raw, S0) ->
+    logger:warning("EAP dispatch unexpected: eap_type=~p eap_subtype=~p "
+                   "session_id=~s imsi=~p eap_state=~p method=~p",
+                   [maps:get(type, Pkt, undefined),
+                    maps:get(subtype, Pkt, undefined),
+                    S0#aaa_session.session_id,
+                    S0#aaa_session.imsi,
+                    S0#aaa_session.eap_state,
+                    S0#aaa_session.method]),
     {error, unexpected_eap}.
-
-%% #region agent log
-type_tag(undefined)           -> undefined;
-type_tag(B) when is_binary(B) -> {binary, byte_size(B)};
-type_tag(Other)               -> {other, Other}.
 
 bsize(undefined)              -> 0;
 bsize(B) when is_binary(B)    -> byte_size(B);
 bsize(_)                      -> 0.
-%% #endregion
 
 %%====================================================================
 %% Method selection — TS 23.003 §19.3.2 / RFC 4187/5448 §4.1.1.6
@@ -284,15 +258,6 @@ method_from_nai(NAI) ->
 
 start_challenge(Iface, Method, IMSI, NAI, Id, S0) ->
     NetworkName = network_name(Iface),
-    %% #region agent log
-    logger:notice("EAP start_challenge: method=~p imsi=~s nai=~s iface=~p "
-                  "network_name=~s session_id=~s",
-                  [Method, IMSI, NAI, Iface, NetworkName,
-                   case S0 of
-                       #aaa_session{session_id = Sid} -> Sid;
-                       _ -> undefined
-                   end]),
-    %% #endregion
     %% TS 29.273 §8.1.2.1.1: SWx MAR User-Name carries the EAP NAI (not
     %% a bare IMSI) so that PyHSS (and any conformant HSS) can parse the
     %% RFC 4187/5448 §4.1.1.6 identity-type prefix.
@@ -330,14 +295,6 @@ build_challenge(aka_prime, IMSI, NAI, NetworkName, AV, LastId, _S0) ->
                 NextId, Rand, Autn, NetworkName, []),
     Mac = aaa_eap_crypto:compute_mac(KAut, Packet0),
     Packet = aaa_eap_crypto:patch_at_mac(Packet0, Mac),
-    %% #region agent log
-    logger:notice("EAP-AKA' Challenge built: len=~p type=~p pkt_hex=~s "
-                  "rand_len=~p autn_len=~p kaut_len=~p netname=~s",
-                  [byte_size(Packet),
-                   case Packet of <<_:32, T, _/binary>> -> T; _ -> undefined end,
-                   hex(Packet), byte_size(Rand), byte_size(Autn),
-                   byte_size(KAut), NetworkName]),
-    %% #endregion
     Updates = #{eap_state => challenge_sent,
                 eap_id => NextId,
                 method => aka_prime,
@@ -362,14 +319,6 @@ build_challenge(aka, IMSI, NAI, NetworkName, AV, LastId, _S0) ->
     Packet0 = aaa_eap_codec:build_aka_challenge(NextId, Rand, Autn, []),
     Mac = aaa_eap_crypto:compute_mac_sha1(KAut, Packet0),
     Packet = aaa_eap_crypto:patch_at_mac(Packet0, Mac),
-    %% #region agent log
-    logger:notice("EAP-AKA Challenge built: len=~p type=~p pkt_hex=~s "
-                  "rand_len=~p autn_len=~p kaut_len=~p",
-                  [byte_size(Packet),
-                   case Packet of <<_:32, T, _/binary>> -> T; _ -> undefined end,
-                   hex(Packet), byte_size(Rand), byte_size(Autn),
-                   byte_size(KAut)]),
-    %% #endregion
     Updates = #{eap_state => challenge_sent,
                 eap_id => NextId,
                 method => aka,
@@ -476,39 +425,3 @@ strip_null(Bin) when is_binary(Bin) ->
         _ -> Bin
     end;
 strip_null(Other) -> iolist_to_binary(Other).
-
-%% #region agent log
-hex(Bin) when is_binary(Bin) ->
-    << <<(nybble(N))>> || <<N:4>> <= Bin >>;
-hex(_) -> <<"">>.
-nybble(N) when N < 10 -> $0 + N;
-nybble(N)             -> $a + (N - 10).
-
-dbg_log(Location, Message, Data, HypId) ->
-    try
-        Path = <<"/home/carsten/Schreibtisch/volte.io/helm/.cursor/debug-35d02f.log">>,
-        Ts   = erlang:system_time(millisecond),
-        Rec  = #{sessionId    => <<"35d02f">>,
-                 hypothesisId => HypId,
-                 timestamp    => Ts,
-                 location     => Location,
-                 message      => Message,
-                 data         => sanitize(Data)},
-        Line = [jsx:encode(Rec), $\n],
-        _ = file:write_file(Path, Line, [append]),
-        ok
-    catch _:_ -> ok end.
-
-sanitize(M) when is_map(M) ->
-    maps:map(fun(_, V) -> to_json(V) end, M);
-sanitize(V) -> to_json(V).
-
-to_json(B) when is_binary(B)  -> B;
-to_json(A) when is_atom(A)    -> atom_to_binary(A, utf8);
-to_json(I) when is_integer(I) -> I;
-to_json(L) when is_list(L) ->
-    try iolist_to_binary(L)
-    catch _:_ -> unicode:characters_to_binary(io_lib:format("~p", [L])) end;
-to_json(T) ->
-    unicode:characters_to_binary(io_lib:format("~p", [T])).
-%% #endregion

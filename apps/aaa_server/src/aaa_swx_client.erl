@@ -116,20 +116,6 @@ multimedia_auth_request(IMSI, NetworkName, NumVectors, Opts) ->
         <<"EAP-AKA'">> -> BaseMsg ++ [{'Access-Network-Identifier', NetworkName}];
         _              -> BaseMsg
     end,
-    %% #region agent log
-    logger:notice("SWx MAR build imsi=~s user_name=~s dest_realm=~s "
-                  "scheme=~s anid=~s auts=~p",
-                  [IMSI, UserName, DestRealm, AuthScheme, NetworkName,
-                   maps:get(auts, Opts, undefined) =/= undefined]),
-    dbg_log(<<"aaa_swx_client.erl:84">>,
-            <<"SWx MAR build">>,
-            #{imsi => IMSI, user_name => UserName,
-              dest_realm => DestRealm,
-              net_name => NetworkName,
-              anid => NetworkName,
-              has_auts => maps:get(auts, Opts, undefined) =/= undefined},
-            <<"H1">>),
-    %% #endregion
     call_and_parse(Msg, fun parse_maa/1, swx_mar_total).
 
 %% @doc Send SAR to HSS.
@@ -161,14 +147,6 @@ server_assignment_request(IMSI, AssignmentType, APN, Opts) ->
         {'Server-Assignment-Type', AssignmentType},
         {'3GPP-AAA-Server-Name', OriginHost}
     ],
-    %% #region agent log
-    logger:notice("SWx SAR build imsi=~s user_name=~s sat=~p",
-                  [IMSI, UserName, AssignmentType]),
-    dbg_log(<<"aaa_swx_client.erl:117">>,
-            <<"SWx SAR build">>,
-            #{imsi => IMSI, user_name => UserName,
-              sat => AssignmentType}, <<"H3">>),
-    %% #endregion
     Msg1 = case APN of
         undefined -> Base;
         _         -> Base ++ [{'Service-Selection', APN}]
@@ -318,10 +296,6 @@ ppa_response(AVPs, _Caps) ->
 %%   Integrity-Key       (626) = IK'         (16 bytes)
 parse_maa(['MAA' | AVPs]) ->
     ResultCode = result_code(AVPs),
-    %% #region agent log
-    logger:notice("SWx parse_maa: result_code=~p avps=~P",
-                  [ResultCode, AVPs, 20]),
-    %% #endregion
     case ResultCode of
         2001 ->
             Items = all_avps('SIP-Auth-Data-Item', AVPs),
@@ -348,28 +322,12 @@ parse_auth_item(Item) when is_list(Item) ->
     CK      = avp('Confidentiality-Key', Item, <<>>),
     IK      = avp('Integrity-Key', Item, <<>>),
     {Rand, Autn} = split_auth(SipAuth),
-    %% #region agent log
-    dbg_log(<<"aaa_swx_client.erl:325">>,
-            <<"SWx parse_auth_item">>,
-            #{sip_auth_len => byte_size(to_bin_safe(SipAuth)),
-              sip_auz_len  => byte_size(to_bin_safe(SipAuz)),
-              ck_len       => byte_size(to_bin_safe(CK)),
-              ik_len       => byte_size(to_bin_safe(IK)),
-              rand_len     => byte_size(to_bin_safe(Rand)),
-              autn_len     => byte_size(to_bin_safe(Autn))},
-            <<"H4">>),
-    %% #endregion
     #{rand => Rand,
       autn => Autn,
       xres => SipAuz,          % XRES in SIP-Authorization per TS 29.273
       ck   => CK,
       ik   => IK};
 parse_auth_item(_) -> undefined.
-
-%% #region agent log
-to_bin_safe(B) when is_binary(B) -> B;
-to_bin_safe(_) -> <<>>.
-%% #endregion
 
 %% SIP-Authenticate = RAND (16) || AUTN (16).
 split_auth(<<Rand:16/binary, Autn:16/binary, _/binary>>) ->
@@ -413,12 +371,7 @@ extract_apns(_) ->
 call_and_parse(Msg, Parser, Metric) ->
     aaa_metrics:inc(Metric),
     Start = erlang:monotonic_time(millisecond),
-    Cmd = case Msg of [C|_] -> C; _ -> unknown end,
     Raw = diameter:call(?SVC, ?APP_ALIAS, Msg, []),
-    %% #region agent log
-    logger:notice("SWx call ~p raw=~P",
-                  [Cmd, classify_diam_ret(Raw), 10]),
-    %% #endregion
     Ret = case Raw of
         {ok, Answer}    -> Parser(Answer);
         Ans when is_list(Ans) -> Parser(Ans);
@@ -429,27 +382,9 @@ call_and_parse(Msg, Parser, Metric) ->
             aaa_metrics:inc(swx_errors_total),
             {error, Other}
     end,
-    %% #region agent log
-    logger:notice("SWx call ~p parsed=~P",
-                  [Cmd, Ret, 8]),
-    %% #endregion
     aaa_metrics:observe_latency(swx_latency,
         erlang:monotonic_time(millisecond) - Start),
     Ret.
-
-%% #region agent log
-classify_diam_ret({ok, Ans}) when is_tuple(Ans) ->
-    {ok_tuple, element(1, Ans), tuple_size(Ans)};
-classify_diam_ret({ok, Ans}) when is_list(Ans) ->
-    Head = case Ans of [H|_] -> H; _ -> empty end,
-    {ok_list, Head, length(Ans)};
-classify_diam_ret({ok, Ans}) ->
-    {ok_other, Ans};
-classify_diam_ret({error, R}) ->
-    {error, R};
-classify_diam_ret(Other) ->
-    {other, Other}.
-%% #endregion
 
 inject_origin(Msg, OH, OR) when is_list(Msg) ->
     %% Replace or prepend Origin-Host / Origin-Realm.
@@ -511,35 +446,3 @@ to_bin(B) when is_binary(B) -> B;
 to_bin(L) when is_list(L)   -> list_to_binary(L);
 to_bin(A) when is_atom(A)   -> atom_to_binary(A, utf8);
 to_bin(I) when is_integer(I)-> integer_to_binary(I).
-
-%% #region agent log
-%% NDJSON line written to the debug-mode session log file so the agent
-%% can cross-reference evidence without scraping logger output.
-dbg_log(Location, Message, Data, HypId) ->
-    try
-        Path = <<"/home/carsten/Schreibtisch/volte.io/helm/.cursor/debug-35d02f.log">>,
-        Ts   = erlang:system_time(millisecond),
-        Rec  = #{sessionId  => <<"35d02f">>,
-                 hypothesisId => HypId,
-                 timestamp  => Ts,
-                 location   => Location,
-                 message    => Message,
-                 data       => dbg_sanitize(Data)},
-        Line = [jsx:encode(Rec), $\n],
-        _ = file:write_file(Path, Line, [append]),
-        ok
-    catch _:_ -> ok end.
-
-dbg_sanitize(M) when is_map(M) ->
-    maps:map(fun(_, V) -> dbg_to_json(V) end, M);
-dbg_sanitize(V) -> dbg_to_json(V).
-
-dbg_to_json(B) when is_binary(B) -> B;
-dbg_to_json(A) when is_atom(A)   -> atom_to_binary(A, utf8);
-dbg_to_json(I) when is_integer(I)-> I;
-dbg_to_json(L) when is_list(L)   ->
-    try iolist_to_binary(L)
-    catch _:_ -> unicode:characters_to_binary(io_lib:format("~p", [L])) end;
-dbg_to_json(T) ->
-    unicode:characters_to_binary(io_lib:format("~p", [T])).
-%% #endregion
