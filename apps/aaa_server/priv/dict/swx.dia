@@ -40,6 +40,8 @@
    AN-Trusted                               1503   Enumerated        V
 
    APN-Configuration                        1430   Grouped          MV
+   APN-Configuration-Profile               1429   Grouped           V
+   All-APN-Configurations-Included-Indicator 1428 Enumerated        V
    Context-Identifier                       1423   Unsigned32       MV
    PDN-Type                                 1456   Enumerated       MV
    Service-Selection                         493   UTF8String       M
@@ -106,6 +108,12 @@
                        * [ Served-Party-IP-Address ]
                        * [ AVP ]
 
+   APN-Configuration-Profile ::= < AVP Header: 1429 10415 >
+                                 [ Context-Identifier ]
+                                 [ All-APN-Configurations-Included-Indicator ]
+                               * [ APN-Configuration ]
+                               * [ AVP ]
+
    AMBR ::= < AVP Header: 1435 10415 >
             { Max-Requested-Bandwidth-UL }
             { Max-Requested-Bandwidth-DL }
@@ -164,6 +172,10 @@
    AAA_USER_DATA_REQUEST                        12
    PGW_UPDATE                                   13
    RESTORATION                                  14
+
+@enum All-APN-Configurations-Included-Indicator
+   ALL_APN_CONFIGURATIONS_INCLUDED              0
+   MODIFIED_ADDED_APN_CONFIGURATIONS_INCLUDED   1
 
 @enum Reason-Code
    PERMANENT_TERMINATION                         0

@@ -358,7 +358,20 @@ parse_saa(_) ->
 %% iterated the outer list looking for `{'APN-Configuration', _}` tuples
 %% at the top, which never matched and silently returned [].
 extract_apns([Inner | _]) when is_list(Inner) ->
-    proplists:get_value('APN-Configuration', Inner, []);
+    APNs0 = proplists:get_value('APN-Configuration', Inner, []),
+    case APNs0 of
+        [] ->
+            case proplists:get_value('APN-Configuration-Profile', Inner, undefined) of
+                [Profile | _] when is_list(Profile) ->
+                    proplists:get_value('APN-Configuration', Profile, []);
+                Profile when is_list(Profile) ->
+                    proplists:get_value('APN-Configuration', Profile, []);
+                _ ->
+                    []
+            end;
+        _ ->
+            APNs0
+    end;
 extract_apns(UserData) when is_list(UserData) ->
     [APN || {'APN-Configuration', APN} <- UserData];
 extract_apns(_) ->
