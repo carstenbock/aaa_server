@@ -133,9 +133,11 @@
                           [ Non-3GPP-IP-Access ]
                           [ Non-3GPP-IP-Access-APN ]
                           [ RAT-Type ]
+                          [ AN-Trusted ]
                           [ Session-Timeout ]
                           [ AMBR ]
                           [ Context-Identifier ]
+                          [ APN-Configuration-Profile ]
                         * [ APN-Configuration ]
                         * [ AVP ]
 
