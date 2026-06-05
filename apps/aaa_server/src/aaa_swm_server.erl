@@ -100,17 +100,23 @@ handle_der(AVPs, Caps) ->
     SessionId  = avp('Session-Id', AVPs, <<>>),
     EapPayload = avp('EAP-Payload', AVPs, <<>>),
     PeerHost   = origin_host(Caps),
+    %% TS 29.273 §9.2.3.1.1: the ePDG carries the UE's outer (local) IP
+    %% on SWu in the DER. Record it on the session so it is queryable by
+    %% IMSI from the core (e.g. the HSS-GUI ePDG Sessions view).
+    UELocalIP  = fmt_ue_ip(avp('UE-Local-IP-Address', AVPs, undefined)),
 
     {Session0, _SessionSource} =
         load_or_create_session_tagged(SessionId, AVPs, PeerHost),
     Result = aaa_eap_relay:process(swm, EapPayload, Session0),
     case Result of
         {challenge, ResponseEAP, Updates} ->
-            aaa_session_mgr:update_session(SessionId, Updates),
+            aaa_session_mgr:update_session(SessionId,
+                merge_ue_ip(Updates, UELocalIP)),
             {reply, dea_multi_round(SessionId, ResponseEAP)};
         {success, ResponseEAP, MSK, Updates} ->
             aaa_metrics:inc(swm_auth_success_total),
-            aaa_session_mgr:update_session(SessionId, Updates),
+            aaa_session_mgr:update_session(SessionId,
+                merge_ue_ip(Updates, UELocalIP)),
             %% Issue SAR already-done inside aaa_eap_relay; fetch cached
             %% subscription to include in the DEA authorization half.
             {reply, dea_success(SessionId, ResponseEAP, MSK, Session0)};
@@ -353,6 +359,7 @@ load_or_create_session_tagged(SessionId, AVPs, PeerHost) ->
                 apn = avp('Service-Selection', AVPs, undefined),
                 rat_type = avp('RAT-Type', AVPs, 0),
                 visited_plmn = avp('Visited-Network-Identifier', AVPs, undefined),
+                ue_local_ip = fmt_ue_ip(avp('UE-Local-IP-Address', AVPs, undefined)),
                 created_ts = 0, updated_ts = 0},
             ok = aaa_session_mgr:create_session(Rec),
             {Rec, created}
@@ -374,6 +381,15 @@ avp(Key, List, Default) ->
 
 origin_host(#diameter_caps{origin_host = {_, H}}) -> H;
 origin_host(_) -> <<"unknown">>.
+
+%% Normalise the decoded UE-Local-IP-Address (an inet:ip_address()
+%% tuple under decode_format=list) to a printable binary for storage
+%% and JSON display. Returns `undefined' when the AVP was absent.
+fmt_ue_ip(IP) when is_tuple(IP) -> list_to_binary(inet:ntoa(IP));
+fmt_ue_ip(_)                    -> undefined.
+
+merge_ue_ip(Updates, undefined) -> Updates;
+merge_ue_ip(Updates, IP)        -> Updates#{ue_local_ip => IP}.
 
 inject_origin(Msg, Caps) when is_list(Msg) ->
     #diameter_caps{origin_host = {OH, _}, origin_realm = {OR, _}} = Caps,

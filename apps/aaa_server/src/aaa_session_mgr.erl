@@ -349,6 +349,7 @@ field_index(apn)                 -> #aaa_session.apn;
 field_index(rat_type)            -> #aaa_session.rat_type;
 field_index(an_trusted)          -> #aaa_session.an_trusted;
 field_index(visited_plmn)        -> #aaa_session.visited_plmn;
+field_index(ue_local_ip)         -> #aaa_session.ue_local_ip;
 field_index(eap_id)              -> #aaa_session.eap_id;
 field_index(eap_state)           -> #aaa_session.eap_state;
 field_index(method)              -> #aaa_session.method;

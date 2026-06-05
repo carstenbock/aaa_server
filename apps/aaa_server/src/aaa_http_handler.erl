@@ -4,7 +4,13 @@
 %%%-------------------------------------------------------------------
 -module(aaa_http_handler).
 
+-include("aaa_session.hrl").
+
 -export([init/2]).
+
+%% Hard cap on the unfiltered listing so a large keyspace can never
+%% blow up the response (the IMSI-filtered path is naturally bounded).
+-define(SESSION_LIST_LIMIT, 500).
 
 init(Req, #{action := health} = State) ->
     %% Liveness: process is alive if session manager is responsive.
@@ -59,11 +65,51 @@ init(Req, #{action := status} = State) ->
     Reply = cowboy_req:reply(200,
         #{<<"content-type">> => <<"application/json">>},
         jsx:encode(Status), Req),
+    {ok, Reply, State};
+
+init(Req, #{action := sessions} = State) ->
+    Qs = cowboy_req:parse_qs(Req),
+    Sessions = case lists:keyfind(<<"imsi">>, 1, Qs) of
+        {<<"imsi">>, IMSI} when is_binary(IMSI), IMSI =/= <<>> ->
+            aaa_session_mgr:get_sessions_for_imsi(IMSI);
+        _ ->
+            lists:sublist(aaa_session_mgr:list_all(), ?SESSION_LIST_LIMIT)
+    end,
+    Body = jsx:encode([session_to_map(S) || S <- Sessions]),
+    Reply = cowboy_req:reply(200,
+        #{<<"content-type">> => <<"application/json">>},
+        Body, Req),
     {ok, Reply, State}.
 
 %% =======================================================
 %% Internal
 %% =======================================================
+
+%% Project a session record onto a JSON-friendly map. Deliberately
+%% omits EAP keying material (CK/IK/MSK/EMSK/K_*) — this endpoint is for
+%% operational visibility, not key escrow.
+session_to_map(#aaa_session{} = S) ->
+    #{session_id   => nullable(S#aaa_session.session_id),
+      imsi         => nullable(S#aaa_session.imsi),
+      nai          => nullable(S#aaa_session.nai),
+      interface    => nullable(S#aaa_session.interface),
+      origin_host  => nullable(S#aaa_session.origin_host),
+      origin_realm => nullable(S#aaa_session.origin_realm),
+      apn          => nullable(S#aaa_session.apn),
+      rat_type     => nullable(S#aaa_session.rat_type),
+      visited_plmn => nullable(S#aaa_session.visited_plmn),
+      ue_local_ip  => nullable(S#aaa_session.ue_local_ip),
+      eap_state    => nullable(S#aaa_session.eap_state),
+      method       => nullable(S#aaa_session.method),
+      pgw_id       => nullable(S#aaa_session.pgw_id),
+      created_ts   => nullable(S#aaa_session.created_ts),
+      updated_ts   => nullable(S#aaa_session.updated_ts),
+      expiry_ts    => nullable(S#aaa_session.expiry_ts)}.
+
+%% jsx encodes `null' but not `undefined'; atoms become strings.
+nullable(undefined)            -> null;
+nullable(V) when is_atom(V)    -> atom_to_binary(V, utf8);
+nullable(V)                    -> V.
 
 readiness_checks() ->
     [

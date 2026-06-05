@@ -61,8 +61,10 @@ init() ->
     set_from_env_int("AAA_REDIS_RECONNECT_SLEEP", redis_reconnect_sleep, 500),
     set_from_env("AAA_REDIS_KEY_PREFIX", redis_key_prefix, "aaa:"),
 
-    %% Log level
-    set_from_env("AAA_LOG_LEVEL", log_level, "info"),
+    %% Log level (applied to the primary logger in aaa_app:start/2).
+    %% Default `notice' matches the OTP default primary level; lower it to
+    %% `warning'/`error' to silence the per-request NOTICE chatter.
+    set_from_env("AAA_LOG_LEVEL", log_level, "notice"),
 
     ok.
 

@@ -17,6 +17,11 @@
     rat_type        :: integer() | undefined,
     an_trusted      :: integer() | undefined,
     visited_plmn    :: binary() | undefined,
+    %% UE outer (local) IP on SWu as reported by the ePDG in the SWm
+    %% UE-Local-IP-Address AVP (TS 29.273 §9.2.3.1.1) — the public/NAT'd
+    %% source address the subscriber attached from over untrusted WiFi.
+    %% Captured at authentication time; stored as a printable string.
+    ue_local_ip     :: binary() | undefined,
     %% EAP state
     eap_id          :: 0..255 | undefined,
     eap_state       :: identity_req | challenge_sent | success | failed | undefined,
