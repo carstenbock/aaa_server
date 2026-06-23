@@ -1,0 +1,18 @@
+# Erlang / rebar3
+_build/
+.rebar3/
+*.beam
+erl_crash.dump
+rebar3.crashdump
+
+# Generated Diameter dictionaries (produced by scripts/compile-diameter-dicts.sh
+# from apps/aaa_server/priv/dict/*.dia at every rebar3 compile)
+apps/aaa_server/src/diameter_gen_*.erl
+apps/aaa_server/include/diameter_gen_*.hrl
+
+# OS
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
