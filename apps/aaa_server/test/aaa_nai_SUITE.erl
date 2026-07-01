@@ -59,7 +59,7 @@ parse_fast_reauth(_Config) ->
     ok.
 
 parse_eap_aka_permanent(_Config) ->
-    NAI = <<"1001010000000002@nai.epc.mnc001.mcc001.3gppnetwork.org">>,
+    NAI = <<"0001010000000002@nai.epc.mnc001.mcc001.3gppnetwork.org">>,
     {ok, Parsed} = aaa_nai:parse(NAI),
     eap_aka_permanent = maps:get(type, Parsed),
     <<"001010000000002">> = maps:get(imsi, Parsed),
@@ -76,12 +76,12 @@ build_permanent(_Config) ->
     ok.
 
 identity_type_table(_Config) ->
-    eap_sim_permanent        = aaa_nai:identity_type($0),
-    eap_aka_permanent        = aaa_nai:identity_type($1),
-    eap_sim_pseudonym        = aaa_nai:identity_type($2),
-    eap_aka_pseudonym        = aaa_nai:identity_type($3),
-    eap_sim_reauth           = aaa_nai:identity_type($4),
-    eap_aka_reauth           = aaa_nai:identity_type($5),
+    eap_aka_permanent        = aaa_nai:identity_type($0),
+    eap_sim_permanent        = aaa_nai:identity_type($1),
+    eap_aka_pseudonym        = aaa_nai:identity_type($2),
+    eap_sim_pseudonym        = aaa_nai:identity_type($3),
+    eap_aka_reauth           = aaa_nai:identity_type($4),
+    eap_sim_reauth           = aaa_nai:identity_type($5),
     eap_aka_prime_permanent  = aaa_nai:identity_type($6),
     eap_aka_prime_pseudonym  = aaa_nai:identity_type($7),
     eap_aka_prime_reauth     = aaa_nai:identity_type($8),
