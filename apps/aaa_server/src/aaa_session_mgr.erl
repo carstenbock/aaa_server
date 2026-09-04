@@ -45,6 +45,9 @@
 -define(SERVER, ?MODULE).
 -define(CLEANUP_INTERVAL_MS, 60 * 1000).
 -define(DEFAULT_TTL_SEC, 3600).
+%% Established SWm/S6b sessions outlive the 1h EAP default so an
+%% HSS RTR hours later can still find the ePDG Origin-Host (TS 29.273).
+-define(ESTABLISHED_TTL_SEC, 604800).
 
 %% Cap on how long the IMSI / NAI / iface index SETs are allowed to
 %% live without being refreshed. Individual sessions carry their own
@@ -62,10 +65,11 @@ start_link() ->
 %% session_id, interface, and any available fields.
 -spec create_session(#aaa_session{}) -> ok | {error, term()}.
 create_session(#aaa_session{session_id = SessionId,
-                            imsi       = IMSI,
+                            imsi       = IMSI0,
                             interface  = Iface} = S0) ->
+    IMSI = normalize_identity(IMSI0),
     Now  = erlang:system_time(second),
-    S1   = S0#aaa_session{created_ts = Now, updated_ts = Now},
+    S1   = S0#aaa_session{imsi = IMSI, created_ts = Now, updated_ts = Now},
     Ttl  = ttl_for(S1),
     Blob = term_to_binary(S1, [{compressed, 3}]),
 
@@ -96,20 +100,15 @@ update_session(SessionId, Updates) when is_map(Updates) ->
             Blob = term_to_binary(S2, [{compressed, 3}]),
             SKey = sess_key(SessionId),
             ExtraCmds =
-                %% Rebuild the IMSI index entry if the IMSI was
-                %% attached for the first time (e.g. DER arrived
-                %% without User-Name, IMSI learned later from the
-                %% HSS MAA).
-                case {S0#aaa_session.imsi, S2#aaa_session.imsi} of
-                    {Same, Same} -> [];
-                    {undefined, NewI} when NewI =/= undefined ->
-                        imsi_cmds(NewI, SessionId, Ttl);
-                    _ -> []
+                %% Re-arm IMSI/iface index TTLs on every update so they
+                %% cannot expire while the session blob is still live.
+                case S2#aaa_session.imsi of
+                    undefined -> [];
+                    NewI -> imsi_cmds(NewI, SessionId, Ttl)
                 end ++
-                %% Same for interface.
-                case {S0#aaa_session.interface, S2#aaa_session.interface} of
-                    {Same2, Same2} -> [];
-                    _ -> iface_cmds(S2#aaa_session.interface, SessionId, Ttl)
+                case S2#aaa_session.interface of
+                    undefined -> [];
+                    Iface -> iface_cmds(Iface, SessionId, Ttl)
                 end,
             case aaa_redis:multi([
                     [<<"SETEX">>, SKey, integer_to_binary(Ttl), Blob]
@@ -137,14 +136,19 @@ get_session(SessionId) ->
             error
     end.
 
--spec get_sessions_for_imsi(binary()) -> [#aaa_session{}].
-get_sessions_for_imsi(IMSI) when is_binary(IMSI) ->
-    case aaa_redis:smembers(imsi_key(IMSI)) of
-        {ok, Ids} when is_list(Ids) ->
-            mget_sessions(Ids);
-        _ -> []
-    end;
-get_sessions_for_imsi(_) -> [].
+-spec get_sessions_for_imsi(binary() | list()) -> [#aaa_session{}].
+get_sessions_for_imsi(IMSI0) ->
+    case normalize_identity(IMSI0) of
+        undefined -> [];
+        IMSI ->
+            Keys = imsi_aliases(IMSI),
+            Ids = lists:usort(lists:append([smembers_ids(K) || K <- Keys])),
+            Sessions = mget_sessions(Ids),
+            case Sessions of
+                [] -> filter_all_by_imsi(IMSI);
+                _  -> Sessions
+            end
+    end.
 
 -spec sessions_by_interface(swm | sta | s6b) -> [#aaa_session{}].
 sessions_by_interface(Iface) ->
@@ -165,7 +169,9 @@ remove_session(SessionId) ->
                 [[<<"DEL">>, sess_key(SessionId)]],
                 case IMSI of
                     undefined -> [];
-                    _ -> [[<<"SREM">>, imsi_key(IMSI), SessionId]]
+                    _ ->
+                        [[<<"SREM">>, imsi_key(K), SessionId]
+                         || K <- imsi_aliases(IMSI)]
                 end,
                 case Iface of
                     undefined -> [];
@@ -196,7 +202,7 @@ remove_sessions_for_imsi(IMSI) when is_binary(IMSI) ->
             [] -> [];
             _  -> [[<<"DEL">> | DelKeys]]
         end,
-        [[<<"DEL">>, imsi_key(IMSI)]],
+        [[<<"DEL">>, imsi_key(K)] || K <- imsi_aliases(IMSI)],
         [[<<"SREM">>, iface_key(I)] ++ [S#aaa_session.session_id
                                           || S <- Sessions,
                                              S#aaa_session.interface =:= I]
@@ -309,6 +315,10 @@ ttl_for(#aaa_session{expiry_ts = T}) when is_integer(T), T > 0 ->
         N when N > 0 -> N;
         _            -> default_ttl()
     end;
+ttl_for(#aaa_session{eap_state = success}) ->
+    established_ttl();
+ttl_for(#aaa_session{interface = s6b}) ->
+    established_ttl();
 ttl_for(_) ->
     default_ttl().
 
@@ -318,11 +328,81 @@ default_ttl() ->
         _                           -> ?DEFAULT_TTL_SEC
     end.
 
+established_ttl() ->
+    case aaa_config:get(session_established_timeout, ?ESTABLISHED_TTL_SEC) of
+        N when is_integer(N), N > 0 -> N;
+        _                           -> ?ESTABLISHED_TTL_SEC
+    end.
+
 imsi_cmds(undefined, _Sid, _Ttl) -> [];
 imsi_cmds(IMSI, Sid, Ttl) ->
-    K = imsi_key(IMSI),
-    [ [<<"SADD">>, K, Sid],
-      [<<"EXPIRE">>, K, integer_to_binary(Ttl + ?INDEX_TTL_MARGIN_SEC)] ].
+    lists:append([
+        begin
+            K = imsi_key(Key),
+            [ [<<"SADD">>, K, Sid],
+              [<<"EXPIRE">>, K, integer_to_binary(Ttl + ?INDEX_TTL_MARGIN_SEC)] ]
+        end || Key <- imsi_aliases(IMSI)
+    ]).
+
+%% Diameter list-decode often hands User-Name as [<<"…">>] (0..1 AVP).
+%% Collapse that to a binary before indexing or looking up.
+normalize_identity(undefined) -> undefined;
+normalize_identity(<<>>) -> undefined;
+normalize_identity(B) when is_binary(B) -> B;
+normalize_identity([H]) -> normalize_identity(H);
+normalize_identity(L) when is_list(L) ->
+    case io_lib:printable_unicode_list(L) orelse
+         lists:all(fun(C) -> is_integer(C) andalso C >= 0 andalso C =< 255 end, L) of
+        true  -> list_to_binary(L);
+        false -> undefined
+    end;
+normalize_identity(_) -> undefined.
+
+%% Index both the raw User-Name (often a NAI) and the bare IMSI so
+%% HSS-initiated SWx RTR (bare IMSI) finds sessions stored from S6b
+%% (permanent NAI) and SWm (bare IMSI or EAP NAI).
+imsi_aliases(undefined) -> [];
+imsi_aliases(IMSI0) ->
+    case normalize_identity(IMSI0) of
+        undefined -> [];
+        IMSI ->
+            User = strip_realm(IMSI),
+            Canon = canonical_imsi(IMSI),
+            lists:usort([IMSI, User, Canon])
+    end.
+
+strip_realm(IMSI) ->
+    Bin = normalize_identity(IMSI),
+    case Bin of
+        undefined -> <<>>;
+        _ ->
+            case binary:split(Bin, <<"@">>) of
+                [User, _] -> User;
+                [User]    -> User
+            end
+    end.
+
+canonical_imsi(IMSI0) ->
+    User = strip_realm(IMSI0),
+    case User of
+        <<D, Rest/binary>> when (D =:= $0 orelse D =:= $6),
+                                 byte_size(Rest) >= 14 ->
+            Rest;
+        _ ->
+            User
+    end.
+
+smembers_ids(IMSI) ->
+    case aaa_redis:smembers(imsi_key(IMSI)) of
+        {ok, Ids} when is_list(Ids) -> Ids;
+        _ -> []
+    end.
+
+filter_all_by_imsi(IMSI) ->
+    Bare = canonical_imsi(IMSI),
+    [S || S <- list_all(),
+          S#aaa_session.imsi =/= undefined,
+          canonical_imsi(S#aaa_session.imsi) =:= Bare].
 
 iface_cmds(undefined, _Sid, _Ttl) -> [];
 iface_cmds(Iface, Sid, Ttl) ->

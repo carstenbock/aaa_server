@@ -90,8 +90,8 @@ dispatch(_Other, _Caps)        -> {answer_message, 3001}.
 %%====================================================================
 
 handle_aar(AVPs, Caps) ->
-    SessionId = avp('Session-Id', AVPs, <<>>),
-    IMSI      = avp('User-Name', AVPs, <<>>),
+    SessionId = unwrap_user_name(avp('Session-Id', AVPs, <<>>)),
+    IMSI      = unwrap_user_name(avp('User-Name', AVPs, <<>>)),
     APN       = avp('Service-Selection', AVPs, undefined),
     PGWHost   = origin_host(Caps),
     AuthReqType = avp('Auth-Request-Type', AVPs, 1),
@@ -262,8 +262,9 @@ aaa_ok(Sid, IMSI, AuthReqType, APNConfig) ->
 %% The SWx decoder delivers 'User-Name' from the AAR as a one-element
 %% list ([<<"…">>]) because of its arity-0..1 declaration. For the
 %% outgoing AAA we want the bare binary the s6b dict expects.
-unwrap_user_name([B | _]) when is_binary(B) -> B;
+unwrap_user_name([B | _]) when is_binary(B) -> unwrap_user_name(B);
 unwrap_user_name(B) when is_binary(B)       -> B;
+unwrap_user_name(L) when is_list(L)         -> list_to_binary(L);
 unwrap_user_name(_)                          -> <<>>.
 
 %% Build a clean APN-Configuration proplist from what the HSS returned

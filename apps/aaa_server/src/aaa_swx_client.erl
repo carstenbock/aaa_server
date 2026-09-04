@@ -214,12 +214,20 @@ handle_request(#diameter_packet{msg = Msg}, _Svc, {_PeerRef, Caps}) ->
 dispatch_incoming(['RTR' | AVPs], Caps) ->
     IMSI = avp('User-Name', AVPs, <<>>),
     ReasonCode = rtr_reason_code(AVPs),
-    logger:info("SWx RTR received for IMSI=~s reason=~p",
-                [IMSI, ReasonCode]),
+    logger:notice("SWx RTR received for IMSI=~s reason=~p",
+                  [IMSI, ReasonCode]),
     aaa_metrics:inc(swx_rtr_total),
     %% Propagate toward ePDG / PGW.
     Sessions = aaa_session_mgr:get_sessions_for_imsi(IMSI),
+    Ifaces = [S#aaa_session.interface || S <- Sessions],
     lists:foreach(fun detach_session/1, Sessions),
+    case lists:member(swm, Ifaces) of
+        true -> ok;
+        false ->
+            %% No cached SWm session: still emit ASR keyed by IMSI so
+            %% the ePDG can look the UE up locally (TS 29.273 §7.1.2.4).
+            aaa_swm_server:emit_abort_for_imsi(IMSI)
+    end,
     aaa_session_mgr:remove_sessions_for_imsi(IMSI),
     rta_response(AVPs, Caps);
 

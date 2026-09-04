@@ -22,7 +22,7 @@
          handle_answer/4, handle_error/4, handle_request/3]).
 
 %% Server-initiated requests (called by SWx RTR/PPR handler)
--export([emit_abort_session/1, emit_reauth/1]).
+-export([emit_abort_session/1, emit_reauth/1, emit_abort_for_imsi/1]).
 
 -define(SVC,        aaa_svc).
 -define(APP_ALIAS,  swm).
@@ -105,8 +105,9 @@ handle_der(AVPs, Caps) ->
     %% IMSI from the core (e.g. the HSS-GUI ePDG Sessions view).
     UELocalIP  = fmt_ue_ip(avp('UE-Local-IP-Address', AVPs, undefined)),
 
+    EpdgHost = avp('Origin-Host', AVPs, PeerHost),
     {Session0, _SessionSource} =
-        load_or_create_session_tagged(SessionId, AVPs, PeerHost),
+        load_or_create_session_tagged(SessionId, AVPs, EpdgHost),
     Result = aaa_eap_relay:process(swm, EapPayload, Session0),
     case Result of
         {challenge, ResponseEAP, Updates} ->
@@ -138,7 +139,7 @@ handle_aar(AVPs, Caps) ->
     SessionId = avp('Session-Id', AVPs, <<>>),
     IMSI      = avp('User-Name', AVPs, <<>>),
     AuthReqType = avp('Auth-Request-Type', AVPs, 1),
-    PeerHost  = origin_host(Caps),
+    PeerHost  = avp('Origin-Host', AVPs, origin_host(Caps)),
     APN       = avp('Service-Selection', AVPs, undefined),
 
     %% Ensure session exists with proper binding (IMSI ↔ SessionId).
@@ -204,9 +205,70 @@ emit_abort_session(#aaa_session{session_id = Sid, origin_host = PeerHost,
            {'Auth-Application-Id', ?SWM_APP_ID},
            {'User-Name', IMSI},
            {'Auth-Session-State', 1}],
-    _ = diameter:call(?SVC, ?APP_ALIAS, Msg, [detach]),
+    %% Dest-Host is the ePDG; AAA's only SWm peers are the DRAs.
+    %% Default filter {all,[host,realm]} therefore fails. Send by realm
+    %% so DRA receives the request and relays on Destination-Host
+    %% (RFC 6733 §6.1.5; DRA ≥ 0.7.53).
+    CallRet = diameter:call(?SVC, ?APP_ALIAS, Msg, [{filter, realm}, detach]),
+    case CallRet of
+        ok ->
+            logger:notice("SWm ASR sent IMSI=~s dest_host=~s", [IMSI, DestHost]);
+        _ ->
+            logger:warning("SWm ASR send failed IMSI=~s dest_host=~s ret=~p",
+                           [IMSI, DestHost, CallRet])
+    end,
     aaa_metrics:inc(swm_asr_total),
     ok.
+
+%% @doc HSS RTR with no cached SWm session: fan ASR toward every known
+%% ePDG Origin-Host (from other live SWm sessions) so the serving ePDG
+%% can look the UE up by IMSI.
+-spec emit_abort_for_imsi(binary() | list()) -> ok.
+emit_abort_for_imsi(IMSI0) ->
+    IMSI = case IMSI0 of
+        B when is_binary(B) -> B;
+        [H] when is_binary(H) -> H;
+        L when is_list(L) -> list_to_binary(L);
+        _ -> <<>>
+    end,
+    case IMSI of
+        <<>> -> ok;
+        _ ->
+            Hosts = lists:usort(unique_swm_dest_hosts() ++ configured_epdg_hosts()),
+            case Hosts of
+                [] ->
+                    logger:notice("SWm ASR skipped for IMSI=~s: no ePDG Destination-Host "
+                                  "(set AAA_SWM_EPDG_DESTINATION_HOSTS)", [IMSI]);
+                _ ->
+                    lists:foreach(
+                      fun(Host) ->
+                          emit_abort_session(#aaa_session{
+                              session_id = <<(to_bin(aaa_config:get(origin_host, <<"aaa">>)))/binary,
+                                             ";rtr;", IMSI/binary>>,
+                              origin_host = Host,
+                              origin_realm = to_bin(aaa_config:get(origin_realm, "localdomain")),
+                              imsi = IMSI
+                          })
+                      end, Hosts)
+            end,
+            ok
+    end.
+
+unique_swm_dest_hosts() ->
+    Hosts = [H || #aaa_session{origin_host = H} <-
+                      aaa_session_mgr:sessions_by_interface(swm),
+                  is_binary(H), H =/= <<>>],
+    lists:usort(Hosts).
+
+configured_epdg_hosts() ->
+    case aaa_config:get(swm_epdg_destination_hosts, []) of
+        L when is_list(L) ->
+            [to_bin(H) || H <- L, H =/= "", H =/= <<>>];
+        B when is_binary(B), B =/= <<>> ->
+            [to_bin(H) || H <- string:split(binary_to_list(B), ",", all),
+                          string:trim(H) =/= ""];
+        _ -> []
+    end.
 
 -spec emit_reauth(#aaa_session{}) -> ok.
 emit_reauth(#aaa_session{session_id = Sid, origin_host = PeerHost,
@@ -231,7 +293,7 @@ emit_reauth(#aaa_session{session_id = Sid, origin_host = PeerHost,
            {'Re-Auth-Request-Type', 0},   % AUTHORIZE_ONLY
            {'User-Name', IMSI},
            {'Auth-Session-State', 1}],
-    _ = diameter:call(?SVC, ?APP_ALIAS, Msg, [detach]),
+    _ = diameter:call(?SVC, ?APP_ALIAS, Msg, [{filter, realm}, detach]),
     aaa_metrics:inc(swm_rar_total),
     ok.
 
@@ -266,7 +328,7 @@ dea_success(Sid, EapPayload, MSK,
             {'Auth-Request-Type', 3},
             {'EAP-Payload', EapPayload},
             {'EAP-Master-Session-Key', MSK},
-            {'Session-Timeout', session_timeout()},
+            {'Session-Timeout', session_established_timeout()},
             {'Auth-Grace-Period', 60},
             {'MIP6-Feature-Vector', mip6_feature_vector()},
             {'3GPP-AAA-Server-Name', OH}],
@@ -298,7 +360,7 @@ aaa_success(Sid, IMSI, AuthReqType, UserData, APNs) ->
             {'Origin-Realm', OR},
             {'Auth-Request-Type', AuthReqType},
             {'User-Name', IMSI},
-            {'Session-Timeout', session_timeout()},
+            {'Session-Timeout', session_established_timeout()},
             {'MIP6-Feature-Vector', mip6_feature_vector()},
             {'3GPP-AAA-Server-Name', OH}],
     with_subscription(Base, IMSI, UserData, APNs).
@@ -406,8 +468,14 @@ to_bin(B) when is_binary(B) -> B;
 to_bin(L) when is_list(L)   -> list_to_binary(L).
 
 session_timeout() ->
-    %% Default 1h; operator can override via AAA_SESSION_TIMEOUT in aaa_config.
+    %% In-progress EAP / Diameter default.
     aaa_config:get(session_timeout, 3600).
+
+session_established_timeout() ->
+    case aaa_config:get(session_established_timeout, undefined) of
+        N when is_integer(N), N > 0 -> N;
+        _ -> session_timeout()
+    end.
 
 %% MIP6-Feature-Vector bits (RFC 5447 §4.1):
 %%   0x00000001 = MIP6_INTEGRATED

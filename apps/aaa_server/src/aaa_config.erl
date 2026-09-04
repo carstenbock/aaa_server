@@ -45,8 +45,13 @@ init() ->
     set_from_env_int("AAA_RADIUS_PORT", radius_port, 1812),
     set_from_env("AAA_RADIUS_SECRET", radius_secret, "change-me"),
 
-    %% Session / authorization defaults
+    %% Session / authorization defaults.
+    %% In-progress EAP stays at 1h; established SWm/S6b sessions use
+    %% AAA_SESSION_ESTABLISHED_TIMEOUT (Redis + DEA Session-Timeout).
     set_from_env_int("AAA_SESSION_TIMEOUT", session_timeout, 3600),
+    set_from_env_int("AAA_SESSION_ESTABLISHED_TIMEOUT",
+                     session_established_timeout, 604800),
+    set_csv("AAA_SWM_EPDG_DESTINATION_HOSTS", swm_epdg_destination_hosts),
 
     %% Redis-backed session store (HA across multiple AAA pods).
     %% Host defaults to the in-cluster Redis StatefulSet service
@@ -118,6 +123,15 @@ set_dra_hosts() ->
                                 string:trim(H) =/= ""]
     end,
     application:set_env(?APP, dra_hosts, Hosts).
+
+set_csv(EnvVar, AppKey) ->
+    Hosts = case os:getenv(EnvVar) of
+        false -> [];
+        Csv ->
+            [string:trim(H) || H <- string:split(Csv, ",", all),
+                                string:trim(H) =/= ""]
+    end,
+    application:set_env(?APP, AppKey, Hosts).
 
 hostname_default() ->
     case os:getenv("HOSTNAME") of
