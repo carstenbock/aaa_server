@@ -285,7 +285,7 @@ build_challenge(aka_prime, IMSI, NAI, NetworkName, AV, LastId, _S0) ->
     #{rand := Rand, autn := Autn, xres := XRES, ck := CK, ik := IK} = AV,
     %% TS 29.273 §8.2.2.1: HSS returns CK'/IK' already derived for
     %% EAP-AKA' when SIP-Authentication-Scheme="EAP-AKA'" and the
-    %% top-level Access-Network-Identifier AVP was supplied. Trust it.
+    %% top-level ANID AVP was supplied. Trust it.
     {CKp, IKp} = {CK, IK},
     Keys = aaa_eap_crypto:derive_keys(CKp, IKp, NAI),
     #{k_aut := KAut, msk := MSK, emsk := EMSK,

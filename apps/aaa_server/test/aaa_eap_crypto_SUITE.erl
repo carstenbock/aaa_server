@@ -21,6 +21,8 @@
     ckik_prime_output_length/1,
     derive_keys_lengths/1,
     derive_keys_determinism/1,
+    derive_keys_rfc5448_case1/1,
+    ckik_prime_rfc5448_case1/1,
     prf_prime_known_length/1,
     at_mac_roundtrip/1,
     at_mac_verify_constant_time/1
@@ -30,6 +32,8 @@ all() ->
     [ckik_prime_output_length,
      derive_keys_lengths,
      derive_keys_determinism,
+     derive_keys_rfc5448_case1,
+     ckik_prime_rfc5448_case1,
      prf_prime_known_length,
      at_mac_roundtrip,
      at_mac_verify_constant_time].
@@ -78,11 +82,47 @@ derive_keys_determinism(_Config) ->
     IKp = <<6:128>>,
     Id  = <<"alice@example.org">>,
     K1  = aaa_eap_crypto:derive_keys(CKp, IKp, Id),
-    K2  = aaa_eap_crypto:derive_keys(<<CKp/binary, IKp/binary>>, Id),
+    %% derive_keys/2 takes the PRF' key itself: IK' | CK' (RFC 5448 §3.3)
+    K2  = aaa_eap_crypto:derive_keys(<<IKp/binary, CKp/binary>>, Id),
     K1  = K2,
     %% Changing identity changes all keys.
     K3  = aaa_eap_crypto:derive_keys(CKp, IKp, <<"bob@example.org">>),
     true = (maps:get(msk, K1) =/= maps:get(msk, K3)),
+    ok.
+
+%% RFC 5448 Appendix C, Case 1. The UE derives K_aut and the MSK on its own:
+%% unless ours are bit-identical it rejects AT_MAC of the challenge (or the
+%% ePDG's IKE AUTH payload) and the attach fails. Determinism and length
+%% checks cannot see a wrong but self-consistent derivation, such as the
+%% CK'|IK' key order this module shipped with.
+derive_keys_rfc5448_case1(_Config) ->
+    CKp = binary:decode_hex(<<"0093962D0DD84AA5684B045C9EDFFA04">>),
+    IKp = binary:decode_hex(<<"CCFC230CA74FCC96C0A5D61164F5A76C">>),
+    #{k_encr := KEncr, k_aut := KAut, k_re := KRe, msk := MSK, emsk := EMSK} =
+        aaa_eap_crypto:derive_keys(CKp, IKp, <<"0555444333222111">>),
+    KEncr = binary:decode_hex(<<"766FA0A6C317174B812D52FBCD11A179">>),
+    KAut  = binary:decode_hex(
+              <<"0842EA722FF6835BFA2032499FC3EC23C2F0E388B4F07543FFC677F1696D71EA">>),
+    KRe   = binary:decode_hex(
+              <<"CF83AA8BC7E0ACED892ACC98E76A9B2095B558C7795C7094715CB3393AA7D17A">>),
+    MSK   = binary:decode_hex(
+              <<"67C42D9AA56C1B79E295E3459FC3D187D42BE0BF818D3070E362C5E967A4D544"
+                "E8ECFE19358AB3039AFF03B7C930588C055BABEE58A02650B067EC4E9347C75A">>),
+    EMSK  = binary:decode_hex(
+              <<"F861703CD775590E16C7679EA3874ADA866311DE290764D760CF76DF647EA01C"
+                "313F69924BDD7650CA9BAC141EA075C4EF9E8029C0E290CDBAD5638B63BC23FB">>),
+    ok.
+
+%% Same vector, one step earlier: CK'/IK' bind the keys to the access
+%% network name ("WLAN"), which is what separates EAP-AKA' from EAP-AKA.
+ckik_prime_rfc5448_case1(_Config) ->
+    CK = binary:decode_hex(<<"5349FBE098649F948F5D2E973A81C00F">>),
+    IK = binary:decode_hex(<<"9744871AD32BF9BBD1DD5CE54E3E2E5A">>),
+    <<SqnXorAk:6/binary, _/binary>> =
+        binary:decode_hex(<<"BB52E91C747AC3AB2A5C23D15EE351D5">>),
+    {CKp, IKp} = aaa_eap_crypto:ckik_prime(CK, IK, <<"WLAN">>, SqnXorAk),
+    CKp = binary:decode_hex(<<"0093962D0DD84AA5684B045C9EDFFA04">>),
+    IKp = binary:decode_hex(<<"CCFC230CA74FCC96C0A5D61164F5A76C">>),
     ok.
 
 prf_prime_known_length(_Config) ->

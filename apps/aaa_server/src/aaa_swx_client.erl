@@ -75,7 +75,7 @@ multimedia_auth_request(IMSI, NetworkName, NumVectors, Opts) ->
     %% TS 29.273 §8.2.2.1.1: SIP-Auth-Data-Item carries the authentication
     %% scheme plus (on resync) SIP-Authorization=RAND||AUTS. It MUST NOT
     %% contain the Network Name — that belongs in the top-level
-    %% Access-Network-Identifier AVP (1263). The older behaviour of
+    %% ANID AVP (1504). The older behaviour of
     %% putting NetworkName in SIP-Authorization caused PyHSS (and any
     %% spec-conformant HSS) to mis-interpret the MAR as an SQN-resync
     %% trigger and feed Milenage a 4-byte "WLAN" blob where RAND||AUTS
@@ -91,7 +91,7 @@ multimedia_auth_request(IMSI, NetworkName, NumVectors, Opts) ->
                 Rand = maps:get(rand, Opts, <<>>),
                 [{'SIP-Authorization', <<Rand/binary, Auts/binary>>}]
         end,
-    %% Access-Network-Identifier (AVP 1263) is REQUIRED by TS 33.402
+    %% ANID (AVP 1504, TS 29.273 §5.2.3.7) is REQUIRED by TS 33.402
     %% §6.2 / RFC 5448 §3.3 for the HSS to derive CK'/IK' bound to the
     %% access network — but ONLY for EAP-AKA'. Plain EAP-AKA (RFC 4187)
     %% has no access-network binding, and PyHSS rejects the MAR with
@@ -113,7 +113,7 @@ multimedia_auth_request(IMSI, NetworkName, NumVectors, Opts) ->
            {'RAT-Type', maps:get(rat_type, Opts, 0)}   % 0 = WLAN
           ],
     Msg = case AuthScheme of
-        <<"EAP-AKA'">> -> BaseMsg ++ [{'Access-Network-Identifier', NetworkName}];
+        <<"EAP-AKA'">> -> BaseMsg ++ [{'ANID', NetworkName}];
         _              -> BaseMsg
     end,
     call_and_parse(Msg, fun parse_maa/1, swx_mar_total).

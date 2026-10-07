@@ -81,7 +81,10 @@
    ;; TS 33.402 §6.2 / RFC 5448 §3.3). Required by the HSS to bind
    ;; CK'/IK' to the specific access network over which the UE is
    ;; authenticating (e.g. "WLAN" for untrusted non-3GPP / SWm).
-   Access-Network-Identifier                1263   OctetString      MV
+   ;; TS 29.273 §5.2.3.7: ANID, AVP code 1504. This entry used to carry
+   ;; code 1263, which is Access-Network-Information (TS 29.214), so no
+   ;; other HSS could have found the access network identity in the MAR.
+   ANID                                     1504   UTF8String       MV
 
 @grouped
 
@@ -230,7 +233,7 @@
            [ 3GPP-AAA-Server-Name ]
            [ RAT-Type ]
            [ AN-Trusted ]
-           [ Access-Network-Identifier ]
+           [ ANID ]
            [ Terminal-Information ]
          * [ Proxy-Info ]
          * [ Route-Record ]

@@ -64,17 +64,24 @@ ckik_prime(CK, IK, Anid, SqnXorAk)
 %% @doc Derive the full EAP-AKA' key schedule from CK'/IK' and the
 %% peer identity (NAI). Returns a map with K_encr (16), K_aut (32),
 %% K_re (32), MSK (64), EMSK (64).
+%%
+%% The PRF' key is IK' followed by CK' (RFC 5448 §3.3). It used to be
+%% CK'|IK': every key came out different from the peer's, so a conformant
+%% UE could not verify AT_MAC of the challenge and no EAP-AKA' attach
+%% ever completed.
+%%
+%% derive_keys/2 takes that key already concatenated, as IK'|CK'.
 -spec derive_keys(binary(), binary()) -> map().
-derive_keys(CKIKprime, Identity) when byte_size(CKIKprime) =:= 32 ->
-    derive_keys_internal(CKIKprime, Identity).
+derive_keys(IKCKprime, Identity) when byte_size(IKCKprime) =:= 32 ->
+    derive_keys_internal(IKCKprime, Identity).
 
 -spec derive_keys(binary(), binary(), binary()) -> map().
 derive_keys(CKp, IKp, Identity)
   when byte_size(CKp) =:= 16, byte_size(IKp) =:= 16 ->
-    derive_keys_internal(<<CKp/binary, IKp/binary>>, Identity).
+    derive_keys_internal(<<IKp/binary, CKp/binary>>, Identity).
 
 derive_keys_internal(Key, Identity) ->
-    %% MK = PRF'(CK'||IK', "EAP-AKA'" | Identity)
+    %% MK = PRF'(IK'|CK', "EAP-AKA'" | Identity)
     S = <<"EAP-AKA'", Identity/binary>>,
     MK = prf_prime(Key, S, 208),
     <<KEncr:16/binary, KAut:32/binary, KRe:32/binary,
