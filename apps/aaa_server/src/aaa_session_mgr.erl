@@ -39,6 +39,7 @@
          remove_session/1, remove_sessions_for_imsi/1,
          supersede_sessions/4,
          origin_state_seen/2, epdg_sessions_before/2,
+         swm_sessions_due/2,
          str_followup/2, end_session/2,
          bind_nai/2, resolve_nai/1,
          count/0, count/1,
@@ -279,6 +280,30 @@ epdg_sessions_before(Host, Before) ->
     [Sid || #aaa_session{session_id = Sid, origin_host = H, updated_ts = U}
                 <- sessions_by_interface(swm),
             H =:= Host, is_integer(U), U < Before].
+
+%% @doc Established SWm sessions last touched before `Cutoff' (seconds),
+%% at most `Max' of them, for the SWm RAR audit (KI-46). Read in chunks of
+%% ?PRUNE_CHUNK: one MGET of every session would hold all blobs at once.
+-spec swm_sessions_due(integer(), non_neg_integer()) -> [#aaa_session{}].
+swm_sessions_due(Cutoff, Max) ->
+    case aaa_redis:smembers(iface_key(swm)) of
+        {ok, Ids} when is_list(Ids) -> due_chunks(Ids, Cutoff, Max, []);
+        _ -> []
+    end.
+
+due_chunks(_Ids, _Cutoff, Max, Acc) when Max =< 0 ->
+    lists:reverse(Acc);
+due_chunks([], _Cutoff, _Max, Acc) ->
+    lists:reverse(Acc);
+due_chunks(Ids, Cutoff, Max, Acc) ->
+    {Chunk, Rest} = case length(Ids) > ?PRUNE_CHUNK of
+        true  -> lists:split(?PRUNE_CHUNK, Ids);
+        false -> {Ids, []}
+    end,
+    Due = lists:sublist([S || #aaa_session{eap_state = success, updated_ts = U} = S
+                                  <- mget_sessions(Chunk),
+                              is_integer(U), U < Cutoff], Max),
+    due_chunks(Rest, Cutoff, Max - length(Due), lists:reverse(Due, Acc)).
 
 -spec sessions_by_interface(swm | sta | s6b) -> [#aaa_session{}].
 sessions_by_interface(Iface) ->

@@ -142,6 +142,8 @@ and WLAN-specific AVPs. Used for Carrier-Wi-Fi / trusted non-3GPP access.
 | `AAA_RADIUS_PORT` | `1812` | RADIUS UDP port |
 | `AAA_RADIUS_SECRET` | `change-me` | Shared secret with the WLAN controller |
 | `AAA_SESSION_TIMEOUT` | `3600` | Default Session-Timeout (seconds) |
+| `AAA_SWM_AUDIT_AGE_SEC` | `21600` | SWm RAR audit of established sessions untouched this long; a 5002 answer ends the session (`aaa_swm_audit_*_total`). `0` = off |
+| `AAA_SWM_AUDIT_INTERVAL_SEC` | `600` | Audit pass interval (one pod per pass, 20 RARs per second, minimum 60) |
 | `AAA_API_PORT` | `8080` | HTTP admin endpoint port |
 | `AAA_LOG_LEVEL` | `info` | `debug` / `info` / `warning` / `error` |
 

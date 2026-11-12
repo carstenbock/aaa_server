@@ -23,6 +23,8 @@
 
 %% Server-initiated requests (called by SWx RTR/PPR handler)
 -export([emit_abort_session/1, emit_reauth/1, emit_abort_for_imsi/1]).
+%% SWm session audit (aaa_swm_audit, KI-46)
+-export([audit_session/1, audit_outcome/1]).
 
 -define(SVC,        aaa_svc).
 -define(APP_ALIAS,  swm).
@@ -384,8 +386,56 @@ configured_epdg_hosts() ->
     end.
 
 -spec emit_reauth(#aaa_session{}) -> ok.
-emit_reauth(#aaa_session{session_id = Sid, origin_host = PeerHost,
-                         origin_realm = PeerRealm, imsi = IMSI}) ->
+emit_reauth(#aaa_session{} = S) ->
+    _ = diameter:call(?SVC, ?APP_ALIAS, rar_msg(S), [{filter, realm}, detach]),
+    aaa_metrics:inc(swm_rar_total),
+    ok.
+
+%% @doc KI-46: ask the ePDG whether an old SWm session still exists. A
+%% session whose ePDG lost it without an STR reaching the AAA (STR lost
+%% in an overload, ePDG crash before 0.0.107) would otherwise stay for the
+%% established lifetime of 7 days. RAR with AUTHORIZE_ONLY (TS 29.273
+%% §7.1.2.2); the ePDG answers DIAMETER_UNKNOWN_SESSION_ID (5002, RFC 6733
+%% §7.1.5) for a Session-Id it does not hold (ePDG >= 0.0.108):
+%%   removed - 5002: the session is ended as an STR would end it
+%%   alive   - 2001: updated_ts is refreshed, the next audit is one age later
+%%   unknown - anything else (timeout, no route, older ePDG): kept
+-spec audit_session(#aaa_session{}) -> alive | removed | unknown.
+audit_session(#aaa_session{session_id = Sid} = S) ->
+    Ret = diameter:call(?SVC, ?APP_ALIAS, rar_msg(S),
+                        [{filter, realm}, {timeout, 5000}]),
+    aaa_metrics:inc(swm_rar_total),
+    case audit_outcome(Ret) of
+        removed ->
+            case aaa_session_mgr:end_session(swm, Sid) of
+                {ok, #aaa_session{imsi = IMSI}, Followup} when is_binary(IMSI) ->
+                    lists:foreach(fun(F) -> str_followup(F, IMSI) end, Followup);
+                _ ->
+                    ok
+            end,
+            removed;
+        alive ->
+            _ = aaa_session_mgr:update_session(Sid, #{}),
+            alive;
+        unknown ->
+            unknown
+    end.
+
+%% The answer of an audit RAR, as returned by diameter:call/4. Pure.
+-spec audit_outcome(term()) -> alive | removed | unknown.
+audit_outcome({ok, Ans}) ->
+    audit_outcome(Ans);
+audit_outcome(['RAA' | AVPs]) ->
+    case avp('Result-Code', AVPs, undefined) of
+        5002 -> removed;
+        2001 -> alive;
+        _    -> unknown
+    end;
+audit_outcome(_) ->
+    unknown.
+
+rar_msg(#aaa_session{session_id = Sid, origin_host = PeerHost,
+                     origin_realm = PeerRealm, imsi = IMSI}) ->
     OH = to_bin(aaa_config:get(origin_host, "aaa.localdomain")),
     OR = to_bin(aaa_config:get(origin_realm, "localdomain")),
     DestRealm = case PeerRealm of
@@ -396,19 +446,16 @@ emit_reauth(#aaa_session{session_id = Sid, origin_host = PeerHost,
         undefined -> OH;
         H -> H
     end,
-    Msg = ['RAR',
-           {'Session-Id', Sid},
-           {'Origin-Host', OH},
-           {'Origin-Realm', OR},
-           {'Destination-Realm', DestRealm},
-           {'Destination-Host', DestHost},
-           {'Auth-Application-Id', ?SWM_APP_ID},
-           {'Re-Auth-Request-Type', 0},   % AUTHORIZE_ONLY
-           {'User-Name', IMSI},
-           {'Auth-Session-State', 1}],
-    _ = diameter:call(?SVC, ?APP_ALIAS, Msg, [{filter, realm}, detach]),
-    aaa_metrics:inc(swm_rar_total),
-    ok.
+    ['RAR',
+     {'Session-Id', Sid},
+     {'Origin-Host', OH},
+     {'Origin-Realm', OR},
+     {'Destination-Realm', DestRealm},
+     {'Destination-Host', DestHost},
+     {'Auth-Application-Id', ?SWM_APP_ID},
+     {'Re-Auth-Request-Type', 0},   % AUTHORIZE_ONLY
+     {'User-Name', IMSI},
+     {'Auth-Session-State', 1}].
 
 %%====================================================================
 %% Message builders

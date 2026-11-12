@@ -38,7 +38,9 @@
     end_session_reports_what_remains/1,
     origin_state_marks_one_restart_per_new_value/1,
     restart_selects_only_that_epdgs_earlier_sessions/1,
-    metrics_show_what_holds_the_memory/1
+    metrics_show_what_holds_the_memory/1,
+    audit_selects_old_established_swm_sessions_only/1,
+    audit_outcome_ends_only_on_unknown_session/1
 ]).
 
 -define(TEST_PREFIX, <<"aaa_test:">>).
@@ -64,7 +66,9 @@ all() ->
      end_session_reports_what_remains,
      origin_state_marks_one_restart_per_new_value,
      restart_selects_only_that_epdgs_earlier_sessions,
-     metrics_show_what_holds_the_memory].
+     metrics_show_what_holds_the_memory,
+     audit_selects_old_established_swm_sessions_only,
+     audit_outcome_ends_only_on_unknown_session].
 
 init_per_suite(Config) ->
     ok = aaa_metrics:init(),
@@ -158,6 +162,38 @@ restart_selects_only_that_epdgs_earlier_sessions(_Config) ->
     Now = erlang:system_time(second),
     [<<"a-1">>] = aaa_session_mgr:epdg_sessions_before(A, Now + 5),
     [] = aaa_session_mgr:epdg_sessions_before(A, Now - 5),
+    ok.
+
+%% KI-46 audit: only established SWm sessions not touched since the cutoff
+%% are asked; an attach in progress (EAP not finished) or an S6b session is
+%% not the ePDG's to confirm, and the per-pass cap holds.
+audit_selects_old_established_swm_sessions_only(_Config) ->
+    Mk = fun(Sid, Iface, Eap) ->
+        ok = aaa_session_mgr:create_session(
+                #aaa_session{session_id = Sid, imsi = <<"00101000000008", Sid/binary>>,
+                             interface = Iface, eap_state = Eap,
+                             origin_host = <<"epdg-a.example">>})
+    end,
+    Mk(<<"1">>, swm, success),
+    Mk(<<"2">>, swm, success),
+    Mk(<<"3">>, swm, challenge_sent),
+    Mk(<<"4">>, s6b, success),
+    Now = erlang:system_time(second),
+    [] = aaa_session_mgr:swm_sessions_due(Now - 5, 10),
+    Due = aaa_session_mgr:swm_sessions_due(Now + 5, 10),
+    [<<"1">>, <<"2">>] = lists:sort([S#aaa_session.session_id || S <- Due]),
+    [_] = aaa_session_mgr:swm_sessions_due(Now + 5, 1),
+    ok.
+
+%% A 5002 is the only answer that ends a session; a timeout or an error
+%% (older ePDG, no route) must keep it, or a live user would lose it.
+audit_outcome_ends_only_on_unknown_session(_Config) ->
+    removed = aaa_swm_server:audit_outcome({ok, ['RAA', {'Session-Id', <<"s">>},
+                                                 {'Result-Code', 5002}]}),
+    alive   = aaa_swm_server:audit_outcome(['RAA', {'Result-Code', 2001}]),
+    unknown = aaa_swm_server:audit_outcome(['RAA', {'Result-Code', 3002}]),
+    unknown = aaa_swm_server:audit_outcome({error, timeout}),
+    unknown = aaa_swm_server:audit_outcome({error, no_connection}),
     ok.
 
 %% The AAA pods were OOM-killed without a trace of what grew (KI-46):

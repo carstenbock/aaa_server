@@ -38,6 +38,10 @@ init([]) ->
           start => {aaa_diameter_svc, start_link, []},
           restart => permanent, shutdown => 10000, type => worker},
 
+        #{id => aaa_swm_audit,
+          start => {aaa_swm_audit, start_link, []},
+          restart => permanent, shutdown => 5000, type => worker},
+
         #{id => aaa_http,
           start => {aaa_http, start_link, []},
           restart => permanent, shutdown => 5000, type => worker}
