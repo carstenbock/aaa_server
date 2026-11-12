@@ -35,7 +35,10 @@
     prune_is_chunked_and_single_runner/1,
     store_full_reports_oom/1,
     str_followup_deregisters_only_after_the_last_session/1,
-    end_session_reports_what_remains/1
+    end_session_reports_what_remains/1,
+    origin_state_marks_one_restart_per_new_value/1,
+    restart_selects_only_that_epdgs_earlier_sessions/1,
+    metrics_show_what_holds_the_memory/1
 ]).
 
 -define(TEST_PREFIX, <<"aaa_test:">>).
@@ -58,7 +61,10 @@ all() ->
      prune_is_chunked_and_single_runner,
      store_full_reports_oom,
      str_followup_deregisters_only_after_the_last_session,
-     end_session_reports_what_remains].
+     end_session_reports_what_remains,
+     origin_state_marks_one_restart_per_new_value,
+     restart_selects_only_that_epdgs_earlier_sessions,
+     metrics_show_what_holds_the_memory].
 
 init_per_suite(Config) ->
     ok = aaa_metrics:init(),
@@ -117,6 +123,51 @@ end_per_testcase(_TC, Config) ->
         true  -> exit(SupPid, shutdown), wait_gone(SupPid, 50);
         false -> ok
     end,
+    ok.
+
+%%====================================================================
+%% KI-46: sessions of an ePDG that restarted without them
+%%====================================================================
+
+%% The first value of an ePDG only sets the baseline; a higher value is a
+%% restart and is reported exactly once (one pod ends the sessions); the
+%% same or a lower value (a late request) is not. Other ePDGs are separate.
+origin_state_marks_one_restart_per_new_value(_Config) ->
+    A = <<"epdg-a.example">>, B = <<"epdg-b.example">>,
+    first   = aaa_session_mgr:origin_state_seen(A, 1000),
+    same    = aaa_session_mgr:origin_state_seen(A, 1000),
+    restart = aaa_session_mgr:origin_state_seen(A, 2000),
+    same    = aaa_session_mgr:origin_state_seen(A, 2000),
+    older   = aaa_session_mgr:origin_state_seen(A, 1000),
+    first   = aaa_session_mgr:origin_state_seen(B, 500),
+    ok.
+
+%% After a restart of ePDG A, its sessions from before go; ePDG B's
+%% sessions and A's sessions of the new incarnation stay.
+restart_selects_only_that_epdgs_earlier_sessions(_Config) ->
+    A = <<"epdg-a.example">>, B = <<"epdg-b.example">>,
+    ok = aaa_session_mgr:create_session(
+            #aaa_session{session_id = <<"a-1">>, imsi = <<"001010000000071">>,
+                         interface = swm, origin_host = A}),
+    ok = aaa_session_mgr:create_session(
+            #aaa_session{session_id = <<"b-1">>, imsi = <<"001010000000072">>,
+                         interface = swm, origin_host = B}),
+    ok = aaa_session_mgr:create_session(
+            #aaa_session{session_id = <<"a-s6b">>, imsi = <<"001010000000071">>,
+                         interface = s6b, origin_host = A, apn = <<"ims">>}),
+    Now = erlang:system_time(second),
+    [<<"a-1">>] = aaa_session_mgr:epdg_sessions_before(A, Now + 5),
+    [] = aaa_session_mgr:epdg_sessions_before(A, Now - 5),
+    ok.
+
+%% The AAA pods were OOM-killed without a trace of what grew (KI-46):
+%% /metrics carries VM memory by type and the largest process.
+metrics_show_what_holds_the_memory(_Config) ->
+    Out = iolist_to_binary(aaa_metrics:format_prometheus()),
+    [{match, _} = re:run(Out, P) || P <- [<<"aaa_vm_memory_bytes\\{type=\"total\"\\} [0-9]+">>,
+                                         <<"aaa_vm_memory_bytes\\{type=\"binary\"\\} [0-9]+">>,
+                                         <<"aaa_vm_message_queue_max [0-9]+">>,
+                                         <<"aaa_vm_largest_process_bytes\\{process=\"[^\"]+\"\\} [0-9]+">>]],
     ok.
 
 %%====================================================================

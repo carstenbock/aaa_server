@@ -38,6 +38,7 @@
          sessions_by_interface/1,
          remove_session/1, remove_sessions_for_imsi/1,
          supersede_sessions/4,
+         origin_state_seen/2, epdg_sessions_before/2,
          str_followup/2, end_session/2,
          bind_nai/2, resolve_nai/1,
          count/0, count/1,
@@ -242,6 +243,42 @@ supersede_sessions(Iface, IMSI, NewSid, APN) ->
         _  -> aaa_metrics:inc(sessions_superseded_total, length(Old))
     end,
     [S#aaa_session.session_id || S <- Old].
+
+%% @doc Record the Origin-State-Id an ePDG sent in a DER or STR (RFC 6733
+%% §8.16; KI-46). The AAA sees the ePDG only through the DRA, never its
+%% CER, so this is the only way to learn that it restarted. Atomic across
+%% the AAA pods: exactly one caller gets `restart' for a new value.
+%%   first   - no value known for this host yet (nothing is removed)
+%%   restart - higher than the known value: the ePDG lost its sessions
+%%   same    - unchanged
+%%   older   - lower than the known value (a late request), ignored
+-spec origin_state_seen(binary(), non_neg_integer()) ->
+          first | restart | same | older | {error, term()}.
+origin_state_seen(Host, State) when is_binary(Host), is_integer(State) ->
+    Script = <<"local old = redis.call('GET', KEYS[1]) "
+               "if not old then redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2]) return 'first' end "
+               "local o = tonumber(old) local n = tonumber(ARGV[1]) "
+               "if n > o then redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2]) return 'restart' end "
+               "if n == o then redis.call('EXPIRE', KEYS[1], ARGV[2]) return 'same' end "
+               "return 'older'">>,
+    Key = aaa_redis:key([<<"epdg_state:">>, Host]),
+    case aaa_redis:q([<<"EVAL">>, Script, <<"1">>, Key, integer_to_binary(State),
+                      integer_to_binary(?ESTABLISHED_TTL_SEC)]) of
+        {ok, R} when R =:= <<"first">>; R =:= <<"restart">>;
+                     R =:= <<"same">>; R =:= <<"older">> ->
+            binary_to_existing_atom(R, utf8);
+        {ok, Other} -> {error, Other};
+        {error, _} = E -> E
+    end.
+
+%% @doc SWm sessions of the ePDG `Host' last touched before `Before'
+%% (seconds, the clock of created_ts/updated_ts): after a restart of that
+%% ePDG they belong to an incarnation that no longer exists.
+-spec epdg_sessions_before(binary(), integer()) -> [binary()].
+epdg_sessions_before(Host, Before) ->
+    [Sid || #aaa_session{session_id = Sid, origin_host = H, updated_ts = U}
+                <- sessions_by_interface(swm),
+            H =:= Host, is_integer(U), U < Before].
 
 -spec sessions_by_interface(swm | sta | s6b) -> [#aaa_session{}].
 sessions_by_interface(Iface) ->

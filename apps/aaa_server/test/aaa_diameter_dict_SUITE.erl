@@ -12,13 +12,15 @@
 -module(aaa_diameter_dict_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
+-include_lib("diameter/include/diameter.hrl").
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([
     swm_dict/1,
     swx_dict/1,
     s6b_dict/1,
-    sta_dict/1
+    sta_dict/1,
+    swm_der_and_str_carry_origin_state_id/1
 ]).
 
 -define(SWM_APP_ID, 16777264).
@@ -27,7 +29,8 @@
 -define(STA_APP_ID, 16777250).
 
 all() ->
-    [swm_dict, swx_dict, s6b_dict, sta_dict].
+    [swm_dict, swx_dict, s6b_dict, sta_dict,
+     swm_der_and_str_carry_origin_state_id].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -47,6 +50,37 @@ s6b_dict(_Config) ->
 
 sta_dict(_Config) ->
     check_dict(diameter_gen_sta, ?STA_APP_ID).
+
+%% KI-46: the ePDG's Origin-State-Id in DER and STR tells the AAA that the
+%% ePDG restarted. It must decode by name and without a 5001 error, which
+%% an M-bit AVP outside the message grammar gets under strict_mbit.
+swm_der_and_str_carry_origin_state_id(_Config) ->
+    Der = ['DER', {'Session-Id', <<"epdg;1;1">>}, {'Auth-Application-Id', ?SWM_APP_ID},
+           {'Origin-Host', <<"epdg-a">>}, {'Origin-Realm', <<"r">>},
+           {'Destination-Realm', <<"r">>}, {'Auth-Request-Type', 3},
+           {'Origin-State-Id', 1762905600}],
+    Str = ['STR', {'Session-Id', <<"epdg;1;1">>}, {'Origin-Host', <<"epdg-a">>},
+           {'Origin-Realm', <<"r">>}, {'Destination-Realm', <<"r">>},
+           {'Auth-Application-Id', ?SWM_APP_ID}, {'Termination-Cause', 1},
+           {'Origin-State-Id', 1762905600}],
+    [1762905600 = decoded_origin_state(M) || M <- [Der, Str]],
+    ok.
+
+decoded_origin_state(Msg) ->
+    Hdr = #diameter_header{version = 1, hop_by_hop_id = 1, end_to_end_id = 1},
+    #diameter_packet{bin = Bin} =
+        diameter_codec:encode(diameter_gen_swm, #diameter_packet{header = Hdr, msg = Msg}),
+    #diameter_packet{msg = [_ | Avps], errors = []} =
+        diameter_codec:decode(diameter_gen_swm, #{decode_format => list,
+                                                  string_decode => false,
+                                                  strict_mbit => true,
+                                                  rfc => 6733,
+                                                  failed_avp => false,
+                                                  app_dictionary => diameter_gen_swm}, Bin),
+    case proplists:get_value('Origin-State-Id', Avps) of
+        [V] -> V;
+        V -> V
+    end.
 
 %%====================================================================
 %% Helpers

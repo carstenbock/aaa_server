@@ -107,6 +107,7 @@ handle_der(AVPs, Caps) ->
 
     EpdgHost = avp('Origin-Host', AVPs, PeerHost),
     note_epdg_host(EpdgHost),
+    note_origin_state(EpdgHost, avp('Origin-State-Id', AVPs, undefined)),
     case load_or_create_session_tagged(SessionId, AVPs, EpdgHost) of
         {error, Reason} ->
             %% No session record, no authentication: the store is full
@@ -217,6 +218,8 @@ str_followup(_, _IMSI) ->
 
 handle_str(AVPs, _Caps) ->
     SessionId = avp('Session-Id', AVPs, <<>>),
+    note_origin_state(avp('Origin-Host', AVPs, undefined),
+                      avp('Origin-State-Id', AVPs, undefined)),
     case aaa_session_mgr:end_session(swm, SessionId) of
         {ok, #aaa_session{imsi = IMSI}, Followup} when is_binary(IMSI) ->
             lists:foreach(fun(F) -> str_followup(F, IMSI) end, Followup);
@@ -316,6 +319,59 @@ note_epdg_host(Host) when is_binary(Host), Host =/= <<>> ->
     _ = aaa_redis:multi([[<<"SADD">>, Key, Host], [<<"EXPIRE">>, Key, <<"86400">>]]),
     ok;
 note_epdg_host(_) -> ok.
+
+%% KI-46: an ePDG that restarted without its sessions (crash, OOM, node
+%% loss) sends no STR for them; they stayed for the established-session
+%% lifetime of 7 days. Its Origin-State-Id (RFC 6733 §8.16) rises with
+%% every start, so the first DER or STR with a higher value ends the
+%% sessions it had before. A per-node cache skips Redis while the value
+%% does not change.
+note_origin_state(Host, State) when is_binary(Host), Host =/= <<>>, is_integer(State) ->
+    Key = {?MODULE, origin_state, Host},
+    case persistent_term:get(Key, undefined) of
+        State -> ok;
+        _ ->
+            case aaa_session_mgr:origin_state_seen(Host, State) of
+                restart ->
+                    persistent_term:put(Key, State),
+                    %% Sessions of the new incarnation are created from now
+                    %% on, on any pod; the margin covers the pods' clocks.
+                    Before = erlang:system_time(second) - 2,
+                    _ = spawn(fun() -> end_sessions_of_restarted_epdg(Host, Before) end),
+                    ok;
+                R when R =:= first; R =:= same ->
+                    persistent_term:put(Key, State);
+                _ ->
+                    ok
+            end
+    end;
+note_origin_state(_, _) ->
+    ok.
+
+%% Ends them as an STR would (SWx deregistration after the last session of
+%% the IMSI, S6b follow-up), paced so a restart of an ePDG with many UEs
+%% does not burst SARs at the HSS: 100 sessions every 0.5 s.
+end_sessions_of_restarted_epdg(Host, Before) ->
+    Sids = aaa_session_mgr:epdg_sessions_before(Host, Before),
+    logger:notice("ePDG ~s restarted (new Origin-State-Id): ending its ~B "
+                  "earlier SWm sessions", [Host, length(Sids)]),
+    end_paced(Sids, 0).
+
+end_paced([], _N) ->
+    ok;
+end_paced([Sid | Rest], N) ->
+    case aaa_session_mgr:end_session(swm, Sid) of
+        {ok, #aaa_session{imsi = IMSI}, Followup} when is_binary(IMSI) ->
+            aaa_metrics:inc(sessions_epdg_restart_removed_total),
+            lists:foreach(fun(F) -> str_followup(F, IMSI) end, Followup);
+        _ ->
+            ok
+    end,
+    case (N + 1) rem 100 of
+        0 -> timer:sleep(500);
+        _ -> ok
+    end,
+    end_paced(Rest, N + 1).
 
 configured_epdg_hosts() ->
     case aaa_config:get(swm_epdg_destination_hosts, []) of

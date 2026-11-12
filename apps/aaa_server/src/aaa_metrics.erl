@@ -60,6 +60,7 @@ init() ->
         active_sessions_s6b,
         sessions_superseded_total,
         sessions_orphaned_total,
+        sessions_epdg_restart_removed_total,
         swm_asr_from_s6b_total,
         redis_oom_errors_total,
         dra_transport_rebuilds_total,
@@ -161,4 +162,41 @@ observe_latency(Prefix, DurationMs) ->
 
 -spec format_prometheus() -> iolist().
 format_prometheus() ->
-    [io_lib:format("aaa_~s ~B\n", [K, V]) || {K, V} <- lists:sort(ets:tab2list(?TAB))].
+    [[io_lib:format("aaa_~s ~B\n", [K, V]) || {K, V} <- lists:sort(ets:tab2list(?TAB))],
+     runtime()].
+
+%% Read at scrape time, to explain the AAA pods' OOM kills (KI-46): VM
+%% memory by type, process count, message queues, and the process holding
+%% the most memory (by registered name or initial call).
+runtime() ->
+    {Procs, MaxQ, SumQ, {TopMem, TopPid}} = lists:foldl(
+        fun(P, {N, Max, Sum, {TM, _} = Top}) ->
+                case erlang:process_info(P, [message_queue_len, memory]) of
+                    [{message_queue_len, Q}, {memory, M}] ->
+                        {N + 1, max(Max, Q), Sum + Q,
+                         case M > TM of true -> {M, P}; false -> Top end};
+                    undefined ->
+                        {N, Max, Sum, Top}
+                end
+        end, {0, 0, 0, {0, undefined}}, erlang:processes()),
+    [[io_lib:format("aaa_vm_memory_bytes{type=\"~s\"} ~B\n", [T, V])
+      || {T, V} <- erlang:memory(),
+         lists:member(T, [total, processes, binary, ets, atom, code, system])],
+     io_lib:format("aaa_vm_process_count ~B\n", [Procs]),
+     io_lib:format("aaa_vm_message_queue_max ~B\n", [MaxQ]),
+     io_lib:format("aaa_vm_message_queue_total ~B\n", [SumQ]),
+     io_lib:format("aaa_vm_largest_process_bytes{process=\"~s\"} ~B\n",
+                   [process_label(TopPid), TopMem])].
+
+process_label(undefined) ->
+    "none";
+process_label(Pid) ->
+    case erlang:process_info(Pid, registered_name) of
+        {registered_name, Name} when is_atom(Name) -> atom_to_list(Name);
+        _ ->
+            case erlang:process_info(Pid, initial_call) of
+                {initial_call, {M, F, A}} ->
+                    lists:flatten(io_lib:format("~s:~s/~B", [M, F, A]));
+                _ -> "unknown"
+            end
+    end.
