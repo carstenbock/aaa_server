@@ -134,11 +134,13 @@ handle_der_authenticated(SessionId, EapPayload, UELocalIP, Session0) ->
             aaa_metrics:inc(swm_auth_success_total),
             aaa_session_mgr:update_session(SessionId,
                 merge_ue_ip(Updates, UELocalIP)),
-            %% This session is now the UE's SWm session; the ones of an
-            %% earlier attach of the same IMSI are gone (TS 29.273
-            %% clause 7: one SWm session per UE at the 3GPP AAA Server).
+            %% This session is now the UE's SWm session for its APN; the
+            %% one of an earlier attach of the same IMSI and APN is gone.
+            %% Sessions of the UE's other APNs are its other PDN
+            %% connections and stay (TS 29.273 §7.1.2.1.1).
             case aaa_session_mgr:supersede_sessions(
-                   swm, Session0#aaa_session.imsi, SessionId, undefined) of
+                   swm, Session0#aaa_session.imsi, SessionId,
+                   Session0#aaa_session.apn) of
                 []  -> ok;
                 Old -> logger:notice("SWm session superseded IMSI=~s new=~s old=~p",
                                      [Session0#aaa_session.imsi, SessionId, Old])

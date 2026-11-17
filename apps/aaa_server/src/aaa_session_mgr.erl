@@ -40,7 +40,7 @@
          supersede_sessions/4,
          origin_state_seen/2, epdg_sessions_before/2,
          swm_sessions_due/2,
-         str_followup/2, end_session/2,
+         str_followup/3, end_session/2,
          bind_nai/2, resolve_nai/1,
          count/0, count/1,
          list_all/0,
@@ -191,23 +191,45 @@ indexed_sessions_for_imsi(IMSI0) ->
 %%     Up to 0.1.25 every SWm or S6b STR sent that SAR at once, while the
 %%     other interface still held the user's session (KI-46).
 %%   * `{swm_asr, S}': the S6b session ended (the PGW released the PDN
-%%     connection) while the SWm session S remains: the ePDG is told to
-%%     end the tunnel (clause 7.2.2.3). Deferred a few seconds, because a
-%%     normal detach makes the PGW's S6b STR and the ePDG's SWm STR race.
-%%   * `{s6b_grace, S}': the SWm session ended while the S6b session S
-%%     remains. No S6b ASR: the ePDG's S2b Delete makes the PGW send its
-%%     own STR. If S is still there after the grace period it is removed.
+%%     connection) while the SWm session S of the same PDN connection
+%%     remains: the ePDG is told to end the tunnel (clause 7.2.2.3).
+%%     Deferred a few seconds, because a normal detach makes the PGW's S6b
+%%     STR and the ePDG's SWm STR race.
+%%   * `{s6b_grace, S}': the SWm session ended while the S6b session S of
+%%     the same PDN connection remains. No S6b ASR: the ePDG's S2b Delete
+%%     makes the PGW send its own STR. If S is still there after the grace
+%%     period it is removed.
+%%
+%% Over S2b a UE has one IKE SA, and so one SWm session, per PDN
+%% connection (TS 29.273 §7.1.2.1.1); a session's PDN connection is its
+%% APN. Ending the MMS PDN connection must not end the IMS tunnel
+%% (KI-199). A session without an APN (stored by a version before 0.1.29,
+%% or from an ePDG that sends none) matches every APN, as before.
 %%
 %% Pure, so the rule is testable without Diameter.
--spec str_followup(swm | sta | s6b, [#aaa_session{}]) ->
+-spec str_followup(swm | sta | s6b, #aaa_session{}, [#aaa_session{}]) ->
           [sar_deregistration | {swm_asr, #aaa_session{}} | {s6b_grace, #aaa_session{}}].
-str_followup(_Iface, []) ->
+str_followup(_Iface, _Ended, []) ->
     [sar_deregistration];
-str_followup(Iface, Remaining) ->
+str_followup(Iface, #aaa_session{apn = APN}, Remaining) ->
     [{swm_asr, S} || Iface =:= s6b,
-                     #aaa_session{interface = swm} = S <- Remaining] ++
+                     #aaa_session{interface = swm} = S <- Remaining,
+                     same_pdn(S#aaa_session.apn, APN)] ++
     [{s6b_grace, S} || Iface =/= s6b,
-                       #aaa_session{interface = s6b} = S <- Remaining].
+                       #aaa_session{interface = s6b} = S <- Remaining,
+                       same_pdn(S#aaa_session.apn, APN)].
+
+%% Whether two sessions belong to the same PDN connection. APN network
+%% identifiers are case-insensitive (TS 23.003 §9.1); an unknown APN
+%% matches any.
+-spec same_pdn(term(), term()) -> boolean().
+same_pdn(undefined, _) -> true;
+same_pdn(_, undefined) -> true;
+same_pdn(A, B)         -> apn_key(A) =:= apn_key(B).
+
+apn_key(A) when is_binary(A) -> string:lowercase(A);
+apn_key(A) when is_list(A)   -> string:lowercase(unicode:characters_to_binary(A));
+apn_key(A)                   -> A.
 
 %% @doc Remove the session `Sid' of `Iface' and return what has to follow
 %% (see str_followup/2). `error' when the session is unknown.
@@ -219,15 +241,18 @@ end_session(Iface, Sid) ->
             remove_loaded(S),
             Remaining = [R || R <- indexed_sessions_for_imsi(IMSI),
                               R#aaa_session.session_id =/= Sid],
-            {ok, S, str_followup(Iface, Remaining)};
+            {ok, S, str_followup(Iface, S, Remaining)};
         error ->
             error
     end.
 
 %% @doc A new session replaces the older sessions of the same IMSI on the
-%% same interface (TS 29.273: the 3GPP AAA Server keeps one SWm session
-%% per UE and one S6b session per PDN connection). On S6b only sessions
-%% of the same APN are replaced, a UE may hold several PDN connections.
+%% same interface. On SWm and S6b only sessions of the same APN are
+%% replaced: over S2b a UE has one IKE SA, and so one SWm session, per
+%% PDN connection (TS 29.273 §7.1.2.1.1: "Each new additional IKE SA
+%% shall be handled in a different Diameter session"), and one S6b
+%% session per PDN connection. Up to 0.1.28 a second SWm session of the
+%% UE (an MMS tunnel) replaced the first (the IMS tunnel), KI-199.
 %% Without this every re-attach left its predecessors in the store for
 %% the established-session lifetime (KI-46). Returns the removed ids.
 -spec supersede_sessions(swm | sta | s6b, binary() | list() | undefined,
@@ -237,7 +262,7 @@ supersede_sessions(Iface, IMSI, NewSid, APN) ->
     Old = [S || #aaa_session{session_id = Sid, interface = I} = S
                     <- indexed_sessions_for_imsi(IMSI),
                 I =:= Iface, Sid =/= NewSid,
-                Iface =/= s6b orelse S#aaa_session.apn =:= APN],
+                Iface =:= sta orelse same_pdn(S#aaa_session.apn, APN)],
     lists:foreach(fun remove_loaded/1, Old),
     case Old of
         [] -> ok;

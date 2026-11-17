@@ -32,6 +32,8 @@
     redis_restart_tolerant/1,
     supersede_replaces_same_interface_session/1,
     supersede_keeps_other_apn_on_s6b/1,
+    supersede_keeps_other_apn_on_swm/1,
+    str_followup_stays_within_the_pdn_connection/1,
     prune_is_chunked_and_single_runner/1,
     store_full_reports_oom/1,
     str_followup_deregisters_only_after_the_last_session/1,
@@ -60,6 +62,8 @@ all() ->
      redis_restart_tolerant,
      supersede_replaces_same_interface_session,
      supersede_keeps_other_apn_on_s6b,
+     supersede_keeps_other_apn_on_swm,
+     str_followup_stays_within_the_pdn_connection,
      prune_is_chunked_and_single_runner,
      store_full_reports_oom,
      str_followup_deregisters_only_after_the_last_session,
@@ -253,6 +257,28 @@ supersede_keeps_other_apn_on_s6b(_Config) ->
     2 = aaa_session_mgr:count(s6b),
     ok.
 
+%% KI-199: an MMS tunnel is a second SWm session of the UE (TS 29.273
+%% §7.1.2.1.1); it must not replace the IMS tunnel's SWm session. A
+%% re-attach to the same APN still replaces the earlier session.
+supersede_keeps_other_apn_on_swm(_Config) ->
+    IMSI = <<"001010000000053">>,
+    ok = aaa_session_mgr:create_session(
+            #aaa_session{session_id = <<"swm-ims">>, imsi = IMSI,
+                         interface = swm, apn = <<"ims">>}),
+    ok = aaa_session_mgr:create_session(
+            #aaa_session{session_id = <<"swm-mms">>, imsi = IMSI,
+                         interface = swm, apn = <<"mms">>}),
+    [] = aaa_session_mgr:supersede_sessions(swm, IMSI, <<"swm-mms">>, <<"mms">>),
+    {ok, _} = aaa_session_mgr:get_session(<<"swm-ims">>),
+    ok = aaa_session_mgr:create_session(
+            #aaa_session{session_id = <<"swm-ims-2">>, imsi = IMSI,
+                         interface = swm, apn = <<"ims">>}),
+    [<<"swm-ims">>] = aaa_session_mgr:supersede_sessions(
+                        swm, IMSI, <<"swm-ims-2">>, <<"ims">>),
+    {ok, _} = aaa_session_mgr:get_session(<<"swm-mms">>),
+    2 = aaa_session_mgr:count(swm),
+    ok.
+
 %% The clean-up removes index members whose session expired, reading the
 %% blobs in chunks (1,200 members exceed one chunk), and only the pod
 %% that holds the lock does it.
@@ -303,12 +329,40 @@ store_full_reports_oom(_Config) ->
 str_followup_deregisters_only_after_the_last_session(_Config) ->
     Swm = #aaa_session{session_id = <<"swm">>, imsi = <<"1">>, interface = swm},
     S6b = #aaa_session{session_id = <<"s6b">>, imsi = <<"1">>, interface = s6b},
-    [sar_deregistration] = aaa_session_mgr:str_followup(swm, []),
-    [sar_deregistration] = aaa_session_mgr:str_followup(s6b, []),
-    [{s6b_grace, S6b}] = aaa_session_mgr:str_followup(swm, [S6b]),
-    [{swm_asr, Swm}] = aaa_session_mgr:str_followup(s6b, [Swm]),
+    [sar_deregistration] = aaa_session_mgr:str_followup(swm, Swm, []),
+    [sar_deregistration] = aaa_session_mgr:str_followup(s6b, S6b, []),
+    [{s6b_grace, S6b}] = aaa_session_mgr:str_followup(swm, Swm, [S6b]),
+    [{swm_asr, Swm}] = aaa_session_mgr:str_followup(s6b, S6b, [Swm]),
     %% A second SWm session (re-attach in progress) is nobody's business here.
-    [] = aaa_session_mgr:str_followup(swm, [Swm]),
+    [] = aaa_session_mgr:str_followup(swm, Swm, [Swm]),
+    ok.
+
+%% KI-199: over S2b a UE has one SWm and one S6b session per PDN
+%% connection (TS 29.273 §7.1.2.1.1). When the PGW releases the MMS PDN
+%% connection, only the MMS tunnel may be ended: an ASR for the IMS SWm
+%% session would drop VoWiFi. Sessions without an APN (stored by an older
+%% version) keep the old, IMSI-wide rule.
+str_followup_stays_within_the_pdn_connection(_Config) ->
+    SwmIms = #aaa_session{session_id = <<"swm-ims">>, imsi = <<"1">>,
+                          interface = swm, apn = <<"ims">>},
+    SwmMms = #aaa_session{session_id = <<"swm-mms">>, imsi = <<"1">>,
+                          interface = swm, apn = <<"mms">>},
+    S6bIms = #aaa_session{session_id = <<"s6b-ims">>, imsi = <<"1">>,
+                          interface = s6b, apn = <<"ims">>},
+    S6bMms = #aaa_session{session_id = <<"s6b-mms">>, imsi = <<"1">>,
+                          interface = s6b, apn = <<"MMS">>},
+    %% MMS S6b ends: ASR only for the MMS SWm session (APN case ignored).
+    [{swm_asr, SwmMms}] =
+        aaa_session_mgr:str_followup(s6b, S6bMms, [SwmIms, SwmMms, S6bIms]),
+    %% MMS SWm ends: only the MMS S6b session waits for the PGW's STR.
+    [{s6b_grace, S6bMms}] =
+        aaa_session_mgr:str_followup(swm, SwmMms, [SwmIms, S6bIms, S6bMms]),
+    %% The MMS PDN connection is gone completely while IMS remains: no
+    %% follow-up at all, in particular no SAR deregistration.
+    [] = aaa_session_mgr:str_followup(s6b, S6bMms, [SwmIms, S6bIms]),
+    %% A SWm session without an APN still gets the ASR, as before.
+    Legacy = SwmIms#aaa_session{apn = undefined},
+    [{swm_asr, Legacy}] = aaa_session_mgr:str_followup(s6b, S6bMms, [Legacy]),
     ok.
 
 end_session_reports_what_remains(_Config) ->
