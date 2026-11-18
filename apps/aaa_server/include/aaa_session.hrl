@@ -10,7 +10,8 @@
     session_id      :: binary(),               % Diameter Session-Id
     imsi            :: binary(),
     nai             :: binary() | undefined,   % full NAI as seen on wire
-    interface       :: swm | sta | s6b,
+    %% `eap' (aaa_eap_server) is never stored by aaa_session_mgr.
+    interface       :: swm | sta | s6b | eap,
     origin_host     :: binary() | undefined,   % peer Origin-Host (ePDG/PGW)
     origin_realm    :: binary() | undefined,
     apn             :: binary() | undefined,   % Service-Selection

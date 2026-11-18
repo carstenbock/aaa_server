@@ -31,10 +31,13 @@
 
 -export([
     process/3,
-    resolve_identity/1
+    resolve_identity/1,
+    registers_on_success/1
 ]).
 
--type iface() :: swm | sta.
+%% `eap' is the Diameter EAP application (RFC 4072, aaa_eap_server): an
+%% authentication without an attach, so no SWx registration follows.
+-type iface() :: swm | sta | eap.
 -type process_result() ::
     {challenge, EapPayload :: binary(), Updates :: map()} |
     {success, EapPayload :: binary(), MSK :: binary(), Updates :: map()} |
@@ -112,13 +115,13 @@ dispatch(Iface, #{code := ?EAP_CODE_RESPONSE, type := ?EAP_TYPE_IDENTITY,
     end;
 
 %% AKA' Challenge response from peer — verify MAC and RES.
-dispatch(_Iface, #{code := ?EAP_CODE_RESPONSE, type := ?EAP_TYPE_AKA_PRIME,
-                   subtype := ?AKA_CHALLENGE, attrs := Attrs},
+dispatch(Iface, #{code := ?EAP_CODE_RESPONSE, type := ?EAP_TYPE_AKA_PRIME,
+                  subtype := ?AKA_CHALLENGE, attrs := Attrs},
          Raw, #aaa_session{xres = XRES, k_aut = KAut} = S0)
   when is_binary(XRES), is_binary(KAut), byte_size(KAut) > 0 ->
     case verify_challenge_response(aka_prime, Attrs, Raw, XRES, KAut) of
         ok ->
-            finalize_success(S0);
+            finalize_success(Iface, S0);
         {error, Why} ->
             logger:warning("EAP-AKA' challenge verify failed: ~p", [Why]),
             aaa_metrics:inc(eap_relay_failure_total),
@@ -129,13 +132,13 @@ dispatch(_Iface, #{code := ?EAP_CODE_RESPONSE, type := ?EAP_TYPE_AKA_PRIME,
     end;
 
 %% EAP-AKA (non-prime) Challenge response from peer.
-dispatch(_Iface, #{code := ?EAP_CODE_RESPONSE, type := ?EAP_TYPE_AKA,
-                   subtype := ?AKA_CHALLENGE, attrs := Attrs},
+dispatch(Iface, #{code := ?EAP_CODE_RESPONSE, type := ?EAP_TYPE_AKA,
+                  subtype := ?AKA_CHALLENGE, attrs := Attrs},
          Raw, #aaa_session{xres = XRES, k_aut = KAut} = S0)
   when is_binary(XRES), is_binary(KAut), byte_size(KAut) > 0 ->
     case verify_challenge_response(aka, Attrs, Raw, XRES, KAut) of
         ok ->
-            finalize_success(S0);
+            finalize_success(Iface, S0);
         {error, Why} ->
             logger:warning("EAP-AKA challenge verify failed: ~p", [Why]),
             aaa_metrics:inc(eap_relay_failure_total),
@@ -396,24 +399,41 @@ resync(Iface, Auts, #aaa_session{imsi = IMSI, rand = Rand, nai = NAI,
 %% Success / MSK delivery
 %%====================================================================
 
-finalize_success(#aaa_session{imsi = IMSI, msk = MSK, eap_id = Id, nai = NAI}) ->
+finalize_success(Iface, #aaa_session{imsi = IMSI, msk = MSK, eap_id = Id, nai = NAI}) ->
     aaa_metrics:inc(eap_relay_success_total),
     SuccessPkt = aaa_eap_codec:build_success(Id),
-    %% Issue SAR (REGISTRATION) to HSS so it records our AAA identity.
-    %% Same User-Name (NAI) as the preceding MAR — TS 29.273 §8.1.2.2.1.
-    SarOpts = case NAI of
-                  N when is_binary(N), byte_size(N) > 0 -> #{user_name => N};
-                  _ -> #{}
-              end,
-    _ = aaa_swx_client:server_assignment_request(IMSI, 1, undefined, SarOpts),
+    case registers_on_success(Iface) of
+        true ->
+            %% Issue SAR (REGISTRATION) to HSS so it records our AAA identity.
+            %% Same User-Name (NAI) as the preceding MAR — TS 29.273 §8.1.2.2.1.
+            SarOpts = case NAI of
+                          N when is_binary(N), byte_size(N) > 0 -> #{user_name => N};
+                          _ -> #{}
+                      end,
+            _ = aaa_swx_client:server_assignment_request(IMSI, 1, undefined, SarOpts);
+        false ->
+            ok
+    end,
     {success, SuccessPkt, MSK, #{eap_state => success}}.
+
+%% @doc Whether a successful authentication registers this AAA at the
+%% HSS (SWx SAR). On the Diameter EAP application the subscriber does not
+%% attach: a SAR would move the HSS's AAA binding of a live VoWiFi
+%% session to this node (ADR-0030).
+-spec registers_on_success(iface()) -> boolean().
+registers_on_success(eap) -> false;
+registers_on_success(_)   -> true.
 
 %%====================================================================
 %% Helpers
 %%====================================================================
 
 network_name(swm) -> aaa_network_name:for_swm();
-network_name(sta) -> aaa_network_name:for_sta().
+network_name(sta) -> aaa_network_name:for_sta();
+%% TODO(TS.43 §2.8.1): TS.43 does not name the access network identity for
+%% EAP-AKA' over the HTTP relay. The SWm value is used; plain EAP-AKA
+%% (root NAI with a leading "0") does not use it.
+network_name(eap) -> aaa_network_name:for_swm().
 
 next_id(#aaa_session{eap_id = undefined}) -> rand:uniform(256) - 1;
 next_id(#aaa_session{eap_id = I})          -> (I + 1) band 16#ff;

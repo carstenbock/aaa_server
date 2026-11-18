@@ -43,6 +43,8 @@
 -define(SWX_APP_ID, 16777265).
 -define(S6B_APP_ID, 16777272).
 -define(STA_APP_ID, 16777250).
+%% Diameter EAP application (RFC 4072 §2.1), not vendor specific.
+-define(EAP_APP_ID, 5).
 
 -define(FIRMWARE_REVISION, 11).
 
@@ -239,7 +241,7 @@ service_options(OH, OR, StaEnabled) ->
      {'Product-Name', "volte.io AAA Server"},
      {'Origin-State-Id', OriginStateId},
      {'Firmware-Revision', ?FIRMWARE_REVISION},
-     {'Auth-Application-Id', AuthIds},
+     {'Auth-Application-Id', AuthIds ++ [?EAP_APP_ID]},
      {'Supported-Vendor-Id', [?VENDOR_3GPP]},
      {'Vendor-Specific-Application-Id',
         [#'diameter_base_Vendor-Specific-Application-Id'{
@@ -261,6 +263,11 @@ service_options(OH, OR, StaEnabled) ->
                     %% errors reach handle_request and we can see WHY
                     %% OTP would have auto-answered 3001.
                     {request_errors, callback}]},
+     {application, [{alias, eap},
+                    {dictionary, diameter_gen_eap},
+                    {module, aaa_eap_server},
+                    {answer_errors, callback},
+                    {request_errors, answer_3xxx}]},
      {application, [{alias, swx},
                     {dictionary, diameter_gen_swx},
                     {module, aaa_swx_client},
@@ -338,7 +345,8 @@ try_connect_swx(Host, #state{dra_port = Port, dra_transport_mod = TMod,
                 %% before any application handler sees it.
                 {capabilities,
                     [{'Auth-Application-Id',
-                        [?SWM_APP_ID, ?SWX_APP_ID, ?S6B_APP_ID]},
+                        [?SWM_APP_ID, ?SWX_APP_ID, ?S6B_APP_ID,
+                         ?EAP_APP_ID]},
                      {'Vendor-Specific-Application-Id',
                         [#'diameter_base_Vendor-Specific-Application-Id'{
                             'Vendor-Id' = ?VENDOR_3GPP,
