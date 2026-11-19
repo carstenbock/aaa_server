@@ -42,6 +42,7 @@
          swm_sessions_due/2,
          str_followup/3, end_session/2,
          bind_nai/2, resolve_nai/1,
+         apply_updates/2,
          count/0, count/1,
          list_all/0,
          %% The periodic clean-up, callable from the test suite.

@@ -1,0 +1,67 @@
+;;
+;; Diameter EAP application — RFC 4072
+;; Application-Id: 5 (RFC 4072 §2.1), no vendor.
+;;
+;; Used by clients that only need an EAP authentication and no SWm
+;; session: the access-proxy that relays the embedded EAP-AKA of
+;; GSMA TS.43 §2.8.1 (ADR-0030). Commands: DER/DEA.
+;;
+;; The messages are the subset of RFC 4072 §3.1 / §3.2 that the AAA
+;; reads or sends; the NASREQ AVPs of the RFC are covered by * [ AVP ].
+;;
+
+@id     5
+@name   diameter_gen_eap
+@prefix diameter_eap
+
+@inherits diameter_gen_base_rfc6733
+
+@avp_types
+
+   ;; RFC 4072 §4.1
+   EAP-Payload                               462   OctetString      M
+   EAP-Reissued-Payload                      463   OctetString      M
+   EAP-Master-Session-Key                    464   OctetString      -
+   EAP-Key-Name                              102   OctetString      -
+
+@messages
+
+   ;; Diameter-EAP-Request (268), RFC 4072 §3.1
+   DER ::= < Diameter Header: 268, REQ, PXY >
+           < Session-Id >
+           { Auth-Application-Id }
+           { Origin-Host }
+           { Origin-Realm }
+           { Destination-Realm }
+           { Auth-Request-Type }
+           { EAP-Payload }
+           [ Destination-Host ]
+           [ Origin-State-Id ]
+           [ User-Name ]
+           [ EAP-Key-Name ]
+           [ Auth-Session-State ]
+         * [ Proxy-Info ]
+         * [ Route-Record ]
+         * [ AVP ]
+
+   ;; Diameter-EAP-Answer (268), RFC 4072 §3.2
+   DEA ::= < Diameter Header: 268, PXY >
+           < Session-Id >
+           { Auth-Application-Id }
+           { Auth-Request-Type }
+           { Result-Code }
+           { Origin-Host }
+           { Origin-Realm }
+           [ User-Name ]
+           [ EAP-Payload ]
+           [ EAP-Reissued-Payload ]
+           [ EAP-Master-Session-Key ]
+           [ EAP-Key-Name ]
+           [ Multi-Round-Time-Out ]
+           [ Error-Message ]
+           [ Error-Reporting-Host ]
+         * [ Failed-AVP ]
+           [ Auth-Session-State ]
+           [ Origin-State-Id ]
+         * [ Proxy-Info ]
+         * [ AVP ]

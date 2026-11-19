@@ -20,6 +20,7 @@
     swx_dict/1,
     s6b_dict/1,
     sta_dict/1,
+    eap_dict/1,
     swm_der_and_str_carry_origin_state_id/1
 ]).
 
@@ -29,7 +30,7 @@
 -define(STA_APP_ID, 16777250).
 
 all() ->
-    [swm_dict, swx_dict, s6b_dict, sta_dict,
+    [swm_dict, swx_dict, s6b_dict, sta_dict, eap_dict,
      swm_der_and_str_carry_origin_state_id].
 
 init_per_suite(Config) -> Config.
@@ -50,6 +51,10 @@ s6b_dict(_Config) ->
 
 sta_dict(_Config) ->
     check_dict(diameter_gen_sta, ?STA_APP_ID).
+
+%% RFC 4072 §2.1: the Diameter EAP application is Application-Id 5.
+eap_dict(_Config) ->
+    check_dict(diameter_gen_eap, 5).
 
 %% KI-46: the ePDG's Origin-State-Id in DER and STR tells the AAA that the
 %% ePDG restarted. It must decode by name and without a 5001 error, which

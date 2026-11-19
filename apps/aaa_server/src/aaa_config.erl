@@ -54,6 +54,9 @@ init() ->
     set_csv("AAA_SWM_EPDG_DESTINATION_HOSTS", swm_epdg_destination_hosts),
     %% Audit of established SWm sessions untouched for this long, by RAR
     %% (aaa_swm_audit, KI-46); 0 turns it off.
+    %% Lifetime of the EAP state of one Diameter EAP (RFC 4072) dialog
+    %% (aaa_eap_server).
+    set_from_env_int("AAA_EAP_APP_STATE_TTL_SEC", eap_app_state_ttl, 60),
     set_from_env_int("AAA_SWM_AUDIT_AGE_SEC", swm_audit_age, 21600),
     set_from_env_int("AAA_SWM_AUDIT_INTERVAL_SEC", swm_audit_interval, 600),
 
